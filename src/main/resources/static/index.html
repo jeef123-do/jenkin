@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f8f6">
+  <meta name="description" content="A friendly, private BMI calculator and weight planning dashboard.">
+  <title>HealthyLife — BMI &amp; Weight Planner</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Main navigation">
+      <a class="brand" href="#dashboard" aria-label="HealthyLife dashboard">
+        <span class="brand-mark" aria-hidden="true">h</span>
+        <span class="brand-copy"><strong>healthy<span>life</span></strong><small>WELLNESS, YOUR WAY</small></span>
+      </a>
+      <div class="nav-label">WORKSPACE</div>
+      <nav class="main-nav">
+        <a class="nav-link active" href="#dashboard" data-section="dashboard"><span class="nav-icon">⌂</span>Dashboard</a>
+        <a class="nav-link" href="#calculator" data-section="calculator"><span class="nav-icon">◉</span>BMI Calculator</a>
+        <a class="nav-link" href="#planner" data-section="planner"><span class="nav-icon">↗</span>Weight Planner</a>
+        <a class="nav-link" href="#tips" data-section="tips"><span class="nav-icon">✳</span>Health Tips</a>
+      </nav>
+      <div class="sidebar-note">
+        <span class="note-icon" aria-hidden="true">✦</span>
+        <strong>Small steps add up.</strong>
+        <p>Progress is personal. Focus on habits that feel good and work for you.</p>
+      </div>
+      <div class="sidebar-footer"><span class="privacy-dot"></span>Your data stays on this device</div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="breadcrumb"><span>Workspace</span><span class="breadcrumb-slash">/</span><strong id="pageName">Dashboard</strong></div>
+        <div class="topbar-right"><span class="demo-badge"><span></span> DEMO PROFILE</span><span class="avatar" aria-label="Demo profile">A</span></div>
+      </header>
+      <div class="storage-notice" id="storageNotice" role="status" aria-live="polite" hidden></div>
+
+      <div class="page-wrap">
+        <section class="page-section active" id="dashboard" aria-labelledby="dashboardTitle">
+          <div class="page-heading">
+            <div><p class="eyebrow">MONDAY, YOUR WAY</p><h1 id="dashboardTitle">Good to see you <span aria-hidden="true">☀</span></h1>
+              <p class="heading-subtitle">A little progress is still progress. Here’s your wellness snapshot.</p></div>
+            <button class="button button-outline" id="resetDemo" type="button"><span aria-hidden="true">↻</span> Reset demo data</button>
+          </div>
+          <div class="demo-banner"><span aria-hidden="true">ⓘ</span><span><strong>Sample dashboard</strong> — these example numbers are for demonstration. Update them in the planner; your entries stay in this browser.</span></div>
+
+          <div class="summary-grid">
+            <article class="summary-card bmi-card bmi-category--overweight" id="bmiCard">
+              <div class="card-topline"><span class="card-icon green-icon">◉</span><span class="card-label">CURRENT BMI</span><span class="trend-pill" id="bmiStatus">OVERWEIGHT</span></div>
+              <div class="metric-row"><strong class="metric" id="dashboardBmi">25.5</strong><span class="metric-unit">kg/m²</span></div>
+              <div class="bmi-meter" id="bmiMeter" role="img" aria-label="BMI category: Overweight">
+                <span class="meter-track bmi-range"><span class="meter-marker" id="bmiMarker"></span></span>
+                <div class="meter-labels" aria-hidden="true">
+                  <span class="bmi-legend--underweight"><strong>Underweight</strong><small>&lt;18.5</small></span>
+                  <span class="bmi-legend--normal"><strong>Normal</strong><small>18.5–&lt;25</small></span>
+                  <span class="bmi-legend--overweight"><strong>Overweight</strong><small>25–&lt;30</small></span>
+                  <span class="bmi-legend--obesity"><strong>Obesity</strong><small>≥30</small></span>
+                </div>
+              </div>
+              <div class="category-caption" id="dashboardCategory">Overweight</div>
+            </article>
+            <article class="summary-card">
+              <div class="card-topline"><span class="card-icon mint-icon">↘</span><span class="card-label">CURRENT WEIGHT</span></div>
+              <div class="metric-row"><strong class="metric" id="dashboardWeight">72.0</strong><span class="metric-unit">kg</span></div>
+              <div class="card-footnote">Your latest recorded weight</div>
+            </article>
+            <article class="summary-card">
+              <div class="card-topline"><span class="card-icon peach-icon">◎</span><span class="card-label">TARGET WEIGHT</span></div>
+              <div class="metric-row"><strong class="metric" id="dashboardTarget">66.0</strong><span class="metric-unit">kg</span></div>
+              <div class="card-footnote" id="targetFootnote">A personal planning goal</div>
+            </article>
+            <article class="summary-card">
+              <div class="card-topline"><span class="card-icon blue-icon">⌁</span><span class="card-label">TO YOUR TARGET</span></div>
+              <div class="metric-row"><strong class="metric" id="dashboardDifference">6.0</strong><span class="metric-unit">kg</span></div>
+              <div class="card-footnote" id="differenceFootnote">A gradual journey, at your pace</div>
+            </article>
+          </div>
+
+          <div class="dashboard-grid">
+            <article class="panel progress-panel">
+              <div class="panel-heading"><div><p class="eyebrow">YOUR JOURNEY</p><h2>Weekly progress</h2></div><span class="chart-legend"><i></i>Weight (kg)</span></div>
+              <p class="panel-description">Illustrative demo data · your real progress may vary</p>
+              <div class="chart-wrap"><canvas id="weeklyChart" aria-label="Weekly demo weight trend from 74 kilograms to 72 kilograms over eight weeks"></canvas></div>
+              <div class="chart-footnote"><span><span class="legend-dot"></span>Example trend only</span><span>Last 8 weeks</span></div>
+            </article>
+            <article class="panel actions-panel">
+              <div class="panel-heading"><div><p class="eyebrow">GET STARTED</p><h2>Quick actions</h2></div></div>
+              <a class="action-card" href="#calculator"><span class="action-symbol action-green">◉</span><span><strong>Calculate your BMI</strong><small>A simple snapshot based on height and weight</small></span><span class="action-arrow">→</span></a>
+              <a class="action-card" href="#planner"><span class="action-symbol action-peach">↗</span><span><strong>Explore a weight plan</strong><small>Set a thoughtful, personal goal</small></span><span class="action-arrow">→</span></a>
+              <div class="tip-mini"><span class="tip-mini-icon">✳</span><p><strong>A gentle reminder</strong><br>Consistency beats perfection. One small habit is a great place to start.</p></div>
+            </article>
+          </div>
+          <p class="disclaimer"><strong>A note about BMI:</strong> BMI is a screening measure, not a medical diagnosis. General adult categories may not be appropriate for children or every population. For personal health advice, speak with a qualified professional.</p>
+        </section>
+
+        <section class="page-section" id="calculator" aria-labelledby="calculatorTitle" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">A QUICK WELLNESS SNAPSHOT</p><h1 id="calculatorTitle">BMI Calculator</h1>
+              <p class="heading-subtitle">Enter your height and weight for a general adult BMI screening estimate.</p></div>
+          </div>
+          <div class="tool-layout">
+            <article class="panel form-panel">
+              <div class="panel-heading"><div><p class="eyebrow">YOUR MEASUREMENTS</p><h2>Let’s calculate</h2></div><span class="step-badge">01</span></div>
+              <form id="bmiForm" novalidate>
+                <label class="field-label" for="bmiHeight">Height <span>Centimeters</span></label>
+                <div class="input-wrap"><input id="bmiHeight" name="heightCm" type="number" min="50" max="250" step="0.1" placeholder="e.g. 168" required><span>cm</span></div>
+                <label class="field-label" for="bmiWeight">Current weight <span>Kilograms</span></label>
+                <div class="input-wrap"><input id="bmiWeight" name="weightKg" type="number" min="20" max="500" step="0.1" placeholder="e.g. 68" required><span>kg</span></div>
+                <fieldset class="sex-fieldset">
+                  <legend class="field-label">Sex <span>Optional</span></legend>
+                  <div class="sex-options" role="radiogroup" aria-describedby="sexHint">
+                    <label class="sex-option"><input type="radio" name="sex" value="male"><span>Male</span></label>
+                    <label class="sex-option"><input type="radio" name="sex" value="female"><span>Female</span></label>
+                  </div>
+                  <p class="sex-hint" id="sexHint">Optional. Saved on this device; it does not change your general adult BMI calculation.</p>
+                </fieldset>
+                <p class="form-hint">For this general adult screening tool, enter a height from 50–250 cm and a weight from 20–500 kg.</p>
+                <button class="button button-primary full-button" type="submit">Calculate my BMI <span aria-hidden="true">→</span></button>
+                <div class="form-message" id="bmiMessage" role="status" aria-live="polite"></div>
+              </form>
+            </article>
+            <article class="panel result-panel" aria-live="polite">
+              <div class="result-placeholder" id="bmiEmpty"><span class="empty-illustration">◉</span><h2>Your result will appear here</h2><p>Enter your measurements and calculate your BMI to see your screening result.</p></div>
+              <div id="bmiResult" hidden>
+                <p class="eyebrow">YOUR BMI RESULT</p><div class="result-number"><strong id="resultBmi">—</strong><span>kg/m²</span></div>
+                <span class="result-category" id="resultCategory">—</span>
+                <p class="result-explanation" id="resultExplanation"></p>
+                <div class="result-gauge" id="resultGauge" role="img" aria-label="BMI category: not calculated">
+                  <div class="gauge-track bmi-range"><span class="gauge-marker" id="resultMarker"></span></div>
+                  <div class="gauge-labels" aria-hidden="true">
+                    <span class="bmi-legend--underweight"><strong>Underweight</strong><small>&lt;18.5</small></span>
+                    <span class="bmi-legend--normal"><strong>Normal</strong><small>18.5–&lt;25</small></span>
+                    <span class="bmi-legend--overweight"><strong>Overweight</strong><small>25–&lt;30</small></span>
+                    <span class="bmi-legend--obesity"><strong>Obesity</strong><small>≥30</small></span>
+                  </div>
+                </div>
+                <p class="result-note">BMI is a screening measure, not a diagnosis. These general adult categories may not be suitable for children or every population.</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="page-section" id="planner" aria-labelledby="plannerTitle" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">SMALL STEPS, YOUR PACE</p><h1 id="plannerTitle">Weight Planner</h1>
+              <p class="heading-subtitle">Explore a goal with a safety-first, flexible perspective.</p></div>
+          </div>
+          <div class="tool-layout planner-layout">
+            <article class="panel form-panel">
+              <div class="panel-heading"><div><p class="eyebrow">YOUR STARTING POINT</p><h2>Plan a personal goal</h2></div><span class="step-badge">02</span></div>
+              <form id="plannerForm" novalidate>
+                <label class="field-label" for="planHeight">Height <span>Centimeters</span></label>
+                <div class="input-wrap"><input id="planHeight" name="heightCm" type="number" min="50" max="250" step="0.1" required><span>cm</span></div>
+                <div class="form-row">
+                  <div><label class="field-label" for="currentWeight">Current weight <span>Kilograms</span></label><div class="input-wrap"><input id="currentWeight" name="currentWeightKg" type="number" min="20" max="500" step="0.1" required><span>kg</span></div></div>
+                  <div><label class="field-label" for="targetWeight">Target weight <span>Kilograms</span></label><div class="input-wrap"><input id="targetWeight" name="targetWeightKg" type="number" min="20" max="500" step="0.1" required><span>kg</span></div></div>
+                </div>
+                <label class="field-label" for="targetDate">Target date <span>Optional</span></label>
+                <div class="input-wrap date-input"><input id="targetDate" name="targetDate" type="date"><span aria-hidden="true">▦</span></div>
+                <p class="form-hint">A date is just for your own planning; it won’t change the illustrative pace estimate.</p>
+                <button class="button button-primary full-button" type="submit">Update my plan <span aria-hidden="true">→</span></button>
+                <div class="form-message" id="plannerMessage" role="status" aria-live="polite"></div>
+              </form>
+            </article>
+            <div class="planner-results">
+              <article class="panel plan-summary">
+                <div class="panel-heading"><div><p class="eyebrow">YOUR SNAPSHOT</p><h2>Thoughtful progress</h2></div><span class="plan-status" id="planStatus">READY</span></div>
+                <div class="plan-stats"><div><span>Current BMI</span><strong id="planCurrentBmi">—</strong><small id="planCurrentCategory">—</small></div><div><span>Target BMI</span><strong id="planTargetBmi">—</strong><small id="planTargetCategory">—</small></div></div>
+                <div class="goal-progress"><div class="goal-progress-head"><span>Weight difference</span><strong id="planDifference">—</strong></div><div class="goal-track"><span id="goalProgressBar"></span></div><div class="goal-progress-label" id="goalProgressLabel">Update your plan to see progress</div></div>
+                <div class="safety-message" id="safetyMessage" role="status" hidden></div>
+                <div class="timeline-card"><span class="timeline-icon">◷</span><div><strong id="timelineTitle">A flexible timeline</strong><p id="timelineText">A safe pace is personal. Update your measurements to see an illustrative estimate when appropriate.</p></div></div>
+              </article>
+              <article class="panel plan-chart-panel"><div class="panel-heading"><div><p class="eyebrow">A VISUAL GUIDE</p><h2>Current to target</h2></div></div><div class="chart-wrap planner-chart-wrap"><canvas id="plannerChart" aria-label="Chart comparing current and target weight"></canvas></div><div class="chart-footnote"><span><span class="legend-dot"></span>Current weight</span><span><span class="legend-dot target-dot"></span>Target weight</span></div></article>
+            </div>
+          </div>
+          <p class="disclaimer"><strong>Keep it kind:</strong> Timeline estimates use an illustrative gradual rate of 0.25–0.5 kg per week for safe weight-loss goals only. Actual progress varies; this is not medical advice and is never a guaranteed deadline.</p>
+        </section>
+
+        <section class="page-section" id="tips" aria-labelledby="tipsTitle" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">EVERYDAY WELLNESS</p><h1 id="tipsTitle">Health Tips</h1>
+              <p class="heading-subtitle">Practical ideas to help build habits that feel sustainable.</p></div>
+          </div>
+          <div class="tips-intro"><span class="tips-intro-icon">✳</span><div><strong>There’s no one-size-fits-all routine.</strong><p>Choose what feels realistic for you, and make changes at your own pace.</p></div></div>
+          <div class="tips-grid">
+            <article class="panel tip-card"><span class="tip-card-icon food-icon">⌁</span><p class="eyebrow">NOURISH</p><h2>Build balanced meals</h2><p>When it works for you, include a mix of vegetables or fruit, sources of protein, and satisfying grains or other carbohydrates. Variety matters more than perfection.</p><span class="tip-takeaway">Make one meal a little more colorful.</span></article>
+            <article class="panel tip-card"><span class="tip-card-icon move-icon">↗</span><p class="eyebrow">MOVE</p><h2>Find movement you enjoy</h2><p>Walking, dancing, stretching, gardening, or a favorite sport all count as ways to move. Start where you are and take breaks when you need them.</p><span class="tip-takeaway">A short walk can be a lovely start.</span></article>
+            <article class="panel tip-card"><span class="tip-card-icon rest-icon">☾</span><p class="eyebrow">REST &amp; HYDRATE</p><h2>Support your daily rhythm</h2><p>Regular sleep routines and drinking fluids throughout the day can support general wellbeing. Individual needs differ, so notice what helps you feel your best.</p><span class="tip-takeaway">Try a calming wind-down routine.</span></article>
+            <article class="panel tip-card"><span class="tip-card-icon habit-icon">✦</span><p class="eyebrow">KEEP IT SUSTAINABLE</p><h2>Make changes that stick</h2><p>Small, repeatable habits are often easier to maintain than big overhauls. Setbacks are normal; simply return to a routine that feels manageable.</p><span class="tip-takeaway">Pick one habit to practice this week.</span></article>
+          </div>
+          <p class="disclaimer"><strong>Informational only:</strong> These general wellness ideas are educational, not a substitute for professional medical advice, diagnosis, or treatment. Talk with a qualified healthcare professional about what is right for you.</p>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
