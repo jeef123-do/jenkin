@@ -45,4 +45,30 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <profile>
+      <id>security</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.owasp</groupId>
+            <artifactId>dependency-check-maven</artifactId>
+            <version>13.0.0</version>
+            <configuration>
+              <failBuildOnCVSS>7.0</failBuildOnCVSS>
+              <failOnError>true</failOnError>
+              <nvdApiKeyEnvironmentVariable>NVD_API_KEY</nvdApiKeyEnvironmentVariable>
+              <skipTestScope>false</skipTestScope>
+              <ossIndexAnalyzerEnabled>false</ossIndexAnalyzerEnabled>
+              <formats>
+                <format>HTML</format>
+                <format>JSON</format>
+              </formats>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

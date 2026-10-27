@@ -11,7 +11,7 @@ HealthyLife is a friendly, responsive wellness dashboard with a BMI calculator a
 - Health tips for balanced meals, movement, rest/hydration, and sustainable habits.
 - Responsive navigation, accessible labels, visible request/loading/error states, local settings, and a reset-to-demo action.
 - REST API with Bean Validation and consistent JSON validation errors.
-- Jenkins pipeline with a Java 21 agent, Maven Wrapper, test report publishing, JAR archiving, and a cleanly stopped HTTP smoke test.
+- Jenkins CI/CD with dependency security scanning, a temporary test deployment, deployed-service health checks, JUnit publishing, and JAR/security-report archiving.
 
 ## Technology stack
 
@@ -29,7 +29,8 @@ HealthyLife is a friendly, responsive wellness dashboard with a BMI calculator a
 ├── .mvn/wrapper/
 ├── pom.xml
 ├── scripts/
-│   └── SmokeCheck.java
+│   ├── SmokeCheck.java
+│   └── test-environment.sh
 └── src/
     ├── main/
     │   ├── java/com/example/healthylife/
@@ -45,7 +46,7 @@ HealthyLife is a friendly, responsive wellness dashboard with a BMI calculator a
 
 - Java 21 JDK
 - For local builds, Maven is optional; the Maven Wrapper downloads the pinned Maven distribution.
-- For Jenkins, use an agent with Java 21 and network access to Maven Central. Maven and Docker do not need to be installed on that agent.
+- For Jenkins, use a Linux agent with Java 21, `/proc`, POSIX `sh`, `nohup`, GNU `timeout`, `grep`, and `tr`. Network access to Maven Central and vulnerability feeds is required. Maven and Docker do not need to be installed on that agent.
 
 The Jenkins pipeline uses `agent any`; Java 21 must be available on the selected agent. The checked-in Maven Wrapper downloads Maven 3.9.9 when needed.
 
@@ -155,34 +156,181 @@ The optional Male/Female selection is saved in `localStorage` and is not sent to
 
 ## Jenkins: Pipeline script from SCM
 
-1. Push this project to a GitHub repository with `pom.xml` and `Jenkinsfile` at its root.
-2. Ensure the selected Jenkins agent has a Java 21 JDK on `PATH` and network access to Maven Central so Maven Wrapper can download Maven 3.9.9. No Docker installation or Docker Pipeline plugin is required.
-3. In Jenkins, select **New Item** → **Pipeline**.
-4. Under **Pipeline**, choose **Pipeline script from SCM**; select **Git**; enter the repository URL and credentials if it is private.
+1. Push the updated project to GitHub with `pom.xml` and `Jenkinsfile` at its root.
+2. Ensure the agent meets the Linux prerequisites above. The inspected `jenkins` container has Java 21, Maven 3.9.9 and GNU `timeout`, but **neither Docker CLI nor a Docker socket**. Host Docker access does not imply Jenkins Docker access. No Docker Pipeline plugin or `agent { docker { ... } }` syntax is used.
+3. Configure the NVD credential described below. Jenkins needs Declarative Pipeline, Git, Credentials Binding, JUnit and Timestamper plugins. No OWASP Jenkins plugin is needed: Maven downloads the pinned scanner.
+4. Create a **Pipeline** job or edit the existing one. Choose **Pipeline script from SCM**, select **Git**, and use `https://github.com/jeef123-do/jenkin.git` with repository credentials if needed.
 5. Set **Branch Specifier** to `*/main` and **Script Path** to `Jenkinsfile`, then save.
-6. Select **Build Now** (or **Build with Parameters**). A successful run checks out the repository, builds, tests, packages the JAR, publishes JUnit results, runs the `/api/health` smoke test, and archives the executable JAR.
+6. Select **Build Now** once to load updated parameter definitions, then use **Build with Parameters**.
 
-The Jenkinsfile explicitly checks out `scm`, so it works with a Pipeline configured as “Pipeline script from SCM.” The smoke-test process has an exit trap and is stopped even when the HTTP check fails.
+### Stages and reports
+
+| Stage | Purpose |
+| --- | --- |
+| Checkout | Explicit `checkout scm`, with automatic checkout disabled. |
+| Build | Require Java 21, then Maven Wrapper `clean compile`. |
+| Test | Run the suite, preserving `SIMULATE_TEST_FAILURE`. |
+| Security Scan | Run OWASP Dependency-Check **13.0.0** via the `security` Maven profile. Fail on scanner errors or vulnerabilities with **CVSS >= 7.0**. |
+| Package | Package the already-tested application as an executable JAR. |
+| Deploy to Test | Start that JAR on the agent's loopback interface and `TEST_PORT`; wait up to 60 seconds for successful Spring startup. |
+| Smoke Test | Check that existing deployment's `/api/health`, requiring HTTP 200 and `"status":"UP"`; never start another instance. |
+
+Post actions retain JUnit results and archive `target/*.jar`, available
+`target/dependency-check-report.html` / `.json`, and `target/deployment/*.log`,
+including reports produced before a failed security gate. An unavailable
+database/service may prevent report generation; no report does **not** mean a
+successful scan. Retention is 10 builds with artifacts for the latest 5. Builds
+of the same job cannot overlap. The overall timeout is 60 minutes and the scan
+timeout is 45 minutes. Standard Declarative behavior skips dependent stages
+after a failure.
+
+### Security scanner setup and policy
+
+1. Request/activate an [NVD API key](https://nvd.nist.gov/developers/request-an-api-key).
+2. In **Manage Jenkins → Credentials → appropriate domain → Add Credentials**,
+   select **Secret text**, paste the key into **Secret**, and set **ID** to
+   `nvd-api-key`. Alternatively, set `NVD_API_KEY_CREDENTIAL_ID` to your credential
+   ID. This parameter is the **ID, never the key**.
+3. Allow outbound HTTPS to Maven Central, `services.nvd.nist.gov`, and supporting
+   Dependency-Check feeds, including CISA KEV and hosted suppressions. Configure
+   the agent proxy/trust store if required.
+4. Run the Pipeline. `withCredentials` provides a masked `NVD_API_KEY` environment
+   variable only during the scan; Maven reads it through
+   `nvdApiKeyEnvironmentVariable`. Never echo it, enable Maven debug logging,
+   pass it on the command line, or commit it.
+
+There was no Dependency-Check installation/cache in the inspected Jenkins agent.
+The profile pins the scanner and Maven must successfully resolve it. Missing or
+empty credentials, download/feed errors, rate limits, invalid keys, missing data,
+and timeouts fail the stage rather than producing a green build. The initial NVD
+download can take many minutes; retain the agent's Maven/Dependency-Check cache.
+Serialize scans sharing a writable database across jobs, or give each agent its
+own cache to avoid database locking.
+
+The explicit **7.0** threshold blocks High/Critical findings; Low/Medium findings
+remain visible in reports. Test dependencies are included. No skip flag,
+suppression file or error-ignoring fallback is configured. OSS Index is
+explicitly disabled because it is an additional authenticated service: this demo
+uses NVD-based dependency matching without requiring Sonatype credentials, with
+less coverage than combining both sources. This is not a source-code, secrets,
+container-image or runtime penetration scan. CPE matching can produce false
+positives/negatives; review findings and remediate dependencies instead of
+weakening the gate. The tool is pinned but vulnerability data changes over time.
+The existing Spring Boot 3.4.5 dependency set may legitimately fail this gate;
+no dependency upgrades or claims of a clean scan are implied by this change.
+
+For a local scan, securely populate `NVD_API_KEY` in your session (do not put its
+value in shell history), then run:
+
+```powershell
+.\mvnw.cmd -B -Psecurity dependency-check:check
+```
+
+### Temporary test environment and Docker prerequisites
+
+The working alternative for the inspected agent is a dedicated Java process
+**inside the Jenkins agent/container**, not production and not a separate
+Smoke Test instance. It binds to `http://127.0.0.1:18081` **inside that agent**.
+Change `TEST_PORT` to another free port between 1024 and 65535 if necessary.
+8080 and 50000 are rejected to protect Jenkins service ports. Host port 8081
+was occupied during inspection, so the default is 18081. Different jobs must
+choose different free ports.
+
+The GNU `timeout` supervisor PID is recorded in `target/deployment/app.pid`.
+Its arguments and the JVM carry a unique build marker. Re-deployment stops only
+a process whose marker matches the current build. An occupied port fails
+startup; it never terminates whoever owns that port. Post `cleanup` runs after
+failure/abort as well as success and signals only the owned PID; the supervisor
+forwards termination to the application. A 10-minute maximum deployment lifetime
+plus a 10-second forced-stop grace bounds leftovers if Jenkins/agent connectivity
+is lost. Normal cleanup waits up to 15 seconds and explicitly fails if the owned
+process does not stop. No Jenkins container or persistent data is deleted.
+
+The port is **not published on the Windows host**. During a live build, inspect
+it from the host with:
+
+```powershell
+docker exec jenkins curl --fail http://127.0.0.1:18081/api/health
+```
+
+The application stops responding after post cleanup. Review archived logs and
+Smoke Test output after completion rather than expecting a persistent website.
+The health check retries for up to 40 seconds and fails on HTTP errors or wrong
+status. The owned process is checked before and after the health request.
+
+For future Docker deployment, provision a **dedicated Docker-capable Linux
+Jenkins agent** with Docker CLI, approved daemon access, a Java 21 application
+image/build recipe, and networking allowing the agent to reach the published
+test port. Host sockets are not automatically available inside Jenkins.
+Docker socket access is effectively host-root authority and needs approval;
+a remote daemon also requires an explicit reachable host address, not assumed
+`localhost`. Then replace the deployment/cleanup script with container lifecycle
+handling and verify the same deployed container. Installing only the Docker
+Pipeline plugin is insufficient. Do not remove/recreate the existing `jenkins`
+container, delete `jenkins_home`, grant broad daemon privileges, or run Docker
+prune as part of this demo.
 
 ### Demonstrate a successful and failing build
 
-1. Run **Build with Parameters** with `SIMULATE_TEST_FAILURE` unchecked. All five stages should pass; check the JUnit results and the archived `jenkins-java-maven-demo-1.0.0.jar`.
-2. Run **Build with Parameters** again with `SIMULATE_TEST_FAILURE` checked. The **Test** stage intentionally fails and Jenkins publishes the test report.
-3. Uncheck the parameter and run again. The test suite and pipeline should pass.
+1. Configure the NVD credential and network prerequisites. Run **Build with
+   Parameters**, `SIMULATE_TEST_FAILURE=false`, `TEST_PORT=18081`,
+   `NVD_API_KEY_CREDENTIAL_ID=nvd-api-key`. Success requires tests **and a real
+   security scan** to pass. If findings block the build, review the HTML report
+   and remediate them first; do not bypass the gate.
+2. Check all seven stages, JUnit results, archived JAR, HTML/JSON security reports,
+   deployment log, and health-check success URL.
+3. Run again with `SIMULATE_TEST_FAILURE=true`. **Test** intentionally fails,
+   JUnit shows the assertion failure, and Security Scan, Package, Deploy to Test
+   and Smoke Test are skipped. This demonstration needs no scanner execution
+   because the failure occurs earlier.
+4. Uncheck the parameter for subsequent normal runs.
+
+### Validation and current limits
+
+- Maven Wrapper `clean package`: verified, **15 tests passed**.
+- `test -Ddemo.fail=true`: verified nonzero exit, **1 intentional failure**.
+- Real deployment script inside the existing Jenkins container: startup and
+  health response at port 18081 verified; repeat deployment, occupied-port
+  rejection without killing the existing app, failing HTTP 404 health check,
+  idempotent cleanup, interrupted-startup cleanup with a failing exit status,
+  and a closed port after cleanup also verified.
+- Dependency-Check 13.0.0 resolution/configuration verified. An invocation against
+  an intentionally empty offline database failed with `NoDataException` and
+  nonzero exit, proving missing-data fail-closed behavior. **No completed
+  vulnerability scan or passing security gate has been verified**; an NVD key
+  and live feed access are prerequisites.
+- Jenkinsfile Groovy syntax parsed successfully with the installed Jenkins
+  Groovy version. The authenticated Declarative validator returned HTTP 403
+  without credentials; **a full Jenkins Pipeline run has not been verified**.
+  An authorized user can validate from PowerShell without putting a token on
+  the command line (curl prompts for the API token as the password):
+
+  ```powershell
+  curl.exe --fail-with-body --user YOUR_JENKINS_USER -X POST -F "jenkinsfile=<Jenkinsfile" http://localhost:8080/pipeline-model-converter/validate
+  ```
+
+  Use a Jenkins **API token**, not an account password; password authentication
+  may additionally require a CSRF crumb. A successful response says
+  `Jenkinsfile successfully validated`. This validates syntax, not execution.
 
 ## Push to GitHub
 
-From the project root, after creating an empty GitHub repository:
+From this existing repository, review only intended changes, commit and push:
 
 ```powershell
-git add .
-git commit -m "Build HealthyLife BMI and weight planner"
-git branch -M main
-git remote add origin https://github.com/<your-account>/<your-repository>.git
+git status --short
+git diff --check
+git diff -- Jenkinsfile pom.xml scripts/test-environment.sh README.md
+git add .gitattributes Jenkinsfile pom.xml scripts/test-environment.sh README.md
+git commit -m "Add security scanning and temporary test deployment" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 git push -u origin main
 ```
 
-If `origin` is already configured, skip `git remote add origin`. For later changes, use `git add .`, `git commit -m "Describe your change"`, and `git push`.
+The inspected branch is `main` and `origin` already points to
+`https://github.com/jeef123-do/jenkin.git`; no remote change or force push is
+needed. Then open `http://localhost:8080`, open the SCM Pipeline job, and follow
+the parameterized build steps above. Commit/push are left to the repository
+owner; never commit credentials or generated reports.
 
 ## Troubleshooting
 
@@ -193,4 +341,6 @@ If `origin` is already configured, skip `git remote add origin`. For later chang
 - **Port 8080 is already in use:** stop the other process or run the app with `.\mvnw.cmd -B spring-boot:run '-Dspring-boot.run.arguments=--server.port=8081'`, then open `http://localhost:8081/`.
 - **The browser reports a connection error:** make sure the application is running and reload the page at `http://localhost:8080/`.
 - **Local settings cannot be saved:** allow site storage in the browser; the app will show a message and continue to use entered values for the open page.
-- **Smoke test fails in Jenkins:** inspect `healthylife-app.log` and the test stage output; the pipeline always attempts to stop the started Java process.
+- **Security Scan fails:** inspect the stage log and available reports. Check the Secret text credential, network/proxy and feed access; remediate blocking CVSS findings instead of disabling failure handling.
+- **Test deployment fails:** inspect `target/deployment/app.log`, choose a free `TEST_PORT`, verify Linux/GNU `timeout`/Java 21 prerequisites, and leave unrelated processes alone.
+- **Smoke test fails in Jenkins:** inspect the deployment log and health-check URL. Cleanup targets only the current build's deployment; an agent-local port is not a Windows-host URL.
