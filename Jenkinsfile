@@ -1,9 +1,5 @@
 pipeline {
-    agent {
-        docker {
-            image 'maven:3.9.9-eclipse-temurin-21'
-        }
-    }
+    agent any
     options {
         timestamps()
         disableConcurrentBuilds()
@@ -22,31 +18,43 @@ pipeline {
         }
         stage('Build') {
             steps {
-                sh 'mvn -B clean package -DskipTests'
+                sh '''
+                    set -eu
+                    if ! java -version 2>&1 | grep -Eq 'version "21([.]|")'; then
+                        echo "HealthyLife requires a Java 21 JDK on this Jenkins agent." >&2
+                        exit 1
+                    fi
+                    sh mvnw -B clean compile -DskipTests
+                '''
             }
         }
         stage('Test') {
             steps {
                 script {
                     if (params.SIMULATE_TEST_FAILURE) {
-                        sh 'mvn -B test -Ddemo.fail=true'
+                        sh 'sh mvnw -B test -Ddemo.fail=true'
                     } else {
-                        sh 'mvn -B test'
+                        sh 'sh mvnw -B test'
                     }
                 }
             }
         }
         stage('Package') {
             steps {
-                sh 'mvn -B package -DskipTests'
-                archiveArtifacts artifacts: 'target/jenkins-java-maven-demo-1.0.0.jar', fingerprint: true
+                sh 'sh mvnw -B package -DskipTests'
             }
         }
-        stage('Run Demo App or Smoke Test') {
+        stage('Smoke Test') {
             steps {
                 sh '''
                     set -eu
-                    java -jar target/jenkins-java-maven-demo-1.0.0.jar --server.port=18080 > healthylife-app.log 2>&1 &
+                    app_jar='target/jenkins-java-maven-demo-1.0.0.jar'
+                    if [ ! -f "$app_jar" ]; then
+                        echo "Packaged application JAR was not found: $app_jar" >&2
+                        exit 1
+                    fi
+
+                    java -jar "$app_jar" --server.port=18080 > healthylife-app.log 2>&1 &
                     app_pid=$!
                     cleanup() {
                         kill "$app_pid" 2>/dev/null || true
@@ -61,7 +69,7 @@ pipeline {
     post {
         always {
             junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
-            archiveArtifacts artifacts: 'target/jenkins-java-maven-demo-1.0.0.jar,healthylife-app.log',
+            archiveArtifacts artifacts: 'target/*.jar,healthylife-app.log',
                              allowEmptyArchive: true,
                              fingerprint: true
             echo 'HealthyLife CI pipeline execution finished.'

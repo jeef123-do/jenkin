@@ -80,12 +80,6 @@
           </div>
 
           <div class="dashboard-grid">
-            <article class="panel progress-panel">
-              <div class="panel-heading"><div><p class="eyebrow">YOUR JOURNEY</p><h2>Weekly progress</h2></div><span class="chart-legend"><i></i>Weight (kg)</span></div>
-              <p class="panel-description">Illustrative demo data · your real progress may vary</p>
-              <div class="chart-wrap"><canvas id="weeklyChart" aria-label="Weekly demo weight trend from 74 kilograms to 72 kilograms over eight weeks"></canvas></div>
-              <div class="chart-footnote"><span><span class="legend-dot"></span>Example trend only</span><span>Last 8 weeks</span></div>
-            </article>
             <article class="panel actions-panel">
               <div class="panel-heading"><div><p class="eyebrow">GET STARTED</p><h2>Quick actions</h2></div></div>
               <a class="action-card" href="#calculator"><span class="action-symbol action-green">◉</span><span><strong>Calculate your BMI</strong><small>A simple snapshot based on height and weight</small></span><span class="action-arrow">→</span></a>
@@ -111,9 +105,9 @@
                 <div class="input-wrap"><input id="bmiWeight" name="weightKg" type="number" min="20" max="500" step="0.1" placeholder="e.g. 68" required><span>kg</span></div>
                 <fieldset class="sex-fieldset">
                   <legend class="field-label">Sex <span>Optional</span></legend>
-                  <div class="sex-options" role="radiogroup" aria-describedby="sexHint">
-                    <label class="sex-option"><input type="radio" name="sex" value="male"><span>Male</span></label>
-                    <label class="sex-option"><input type="radio" name="sex" value="female"><span>Female</span></label>
+                  <div class="sex-options" aria-describedby="sexHint">
+                    <label class="sex-option" for="sexMale"><input id="sexMale" type="radio" name="sex" value="MALE"><span>Male</span></label>
+                    <label class="sex-option" for="sexFemale"><input id="sexFemale" type="radio" name="sex" value="FEMALE"><span>Female</span></label>
                   </div>
                   <p class="sex-hint" id="sexHint">Optional. Saved on this device; it does not change your general adult BMI calculation.</p>
                 </fieldset>

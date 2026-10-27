@@ -1,5 +1,6 @@
 const STORAGE_KEY = "healthylife-profile-v1";
 const DEMO_PROFILE = Object.freeze({ heightCm: 168, currentWeightKg: 72, targetWeightKg: 66, targetDate: "", sex: null });
+const SEX_VALUES = Object.freeze(["MALE", "FEMALE"]);
 const BMI_GAUGE_MIN = 10;
 const BMI_GAUGE_MAX = 40;
 const BMI_CATEGORIES = Object.freeze({
@@ -8,8 +9,6 @@ const BMI_CATEGORIES = Object.freeze({
   overweight: Object.freeze({ label: "Overweight", cssClass: "bmi-category--overweight", explanation: "Above the general adult BMI range; BMI alone cannot assess health." }),
   obesity: Object.freeze({ label: "Obesity range", cssClass: "bmi-category--obesity", explanation: "BMI is a screening measure and does not diagnose a health condition." })
 });
-const WEEKLY_DEMO = [74, 73.8, 73.5, 73.1, 73, 72.7, 72.4, 72];
-
 const state = {
   profile: { ...DEMO_PROFILE }
 };
@@ -24,10 +23,13 @@ function readProfile() {
     if (!saved) return { ...DEMO_PROFILE };
     const parsed = JSON.parse(saved);
     const profile = { ...DEMO_PROFILE, ...parsed };
+    if (profile.sex === "male" || profile.sex === "female") {
+      profile.sex = profile.sex.toUpperCase();
+    }
     if (!isValidNumber(profile.heightCm, 50, 250)
         || !isValidNumber(profile.currentWeightKg, 20, 500)
         || !isValidNumber(profile.targetWeightKg, 20, 500)
-        || ![null, "male", "female"].includes(profile.sex)
+        || ![null, ...SEX_VALUES].includes(profile.sex)
         || typeof profile.targetDate !== "string") {
       throw new Error("Saved profile values are invalid.");
     }
@@ -97,7 +99,6 @@ function setSection(sectionId) {
     else link.removeAttribute("aria-current");
   });
   byId("pageName").textContent = current.querySelector("h1").textContent.trim();
-  if (current.id === "dashboard") drawWeeklyChart();
   if (current.id === "planner") drawPlannerChart(state.profile);
 }
 
@@ -121,7 +122,6 @@ function updateDashboard(profile) {
   byId("differenceFootnote").textContent = delta === 0 ? "You’re at your selected goal" : delta < 0 ? "A gradual journey, at your pace" : "A personal planning goal";
   byId("bmiMarker").style.setProperty("--bmi-marker-position", `${bmiGaugePosition(exactBmi)}%`);
   drawPlannerChart(profile);
-  drawWeeklyChart();
 }
 
 function getProfileFromPlanner() {
@@ -212,81 +212,6 @@ function populateInputs(profile) {
   document.querySelectorAll('input[name="sex"]').forEach((input) => {
     input.checked = input.value === profile.sex;
   });
-}
-
-function drawLineChart(canvas, values, labels, color, fill) {
-  if (!canvas || canvas.hidden) return;
-  const bounds = canvas.getBoundingClientRect();
-  if (!bounds.width || !bounds.height) return;
-  const ratio = window.devicePixelRatio || 1;
-  canvas.width = Math.round(bounds.width * ratio);
-  canvas.height = Math.round(bounds.height * ratio);
-  const context = canvas.getContext("2d");
-  context.scale(ratio, ratio);
-  const width = bounds.width;
-  const height = bounds.height;
-  const left = 31, right = 9, top = 14, bottom = 23;
-  const plotWidth = width - left - right;
-  const plotHeight = height - top - bottom;
-  const minValue = Math.floor(Math.min(...values) - 1);
-  const maxValue = Math.ceil(Math.max(...values) + 1);
-  const point = (index) => ({
-    x: left + (plotWidth * index) / Math.max(1, values.length - 1),
-    y: top + plotHeight * (1 - (values[index] - minValue) / (maxValue - minValue))
-  });
-
-  context.font = "9px 'DM Sans', sans-serif";
-  context.textBaseline = "middle";
-  for (let tick = 0; tick <= 3; tick += 1) {
-    const y = top + (plotHeight * tick) / 3;
-    const value = maxValue - ((maxValue - minValue) * tick) / 3;
-    context.strokeStyle = "#edf1ef";
-    context.lineWidth = 1;
-    context.beginPath();
-    context.moveTo(left, y);
-    context.lineTo(width - right, y);
-    context.stroke();
-    context.fillStyle = "#98a69f";
-    context.textAlign = "right";
-    context.fillText(value.toFixed(0), left - 7, y);
-  }
-
-  const points = values.map((_, index) => point(index));
-  context.beginPath();
-  points.forEach((p, index) => index === 0 ? context.moveTo(p.x, p.y) : context.lineTo(p.x, p.y));
-  if (fill) {
-    context.lineTo(points.at(-1).x, top + plotHeight);
-    context.lineTo(points[0].x, top + plotHeight);
-    context.closePath();
-    context.fillStyle = "rgba(77, 174, 129, .10)";
-    context.fill();
-    context.beginPath();
-    points.forEach((p, index) => index === 0 ? context.moveTo(p.x, p.y) : context.lineTo(p.x, p.y));
-  }
-  context.strokeStyle = color;
-  context.lineWidth = 2.2;
-  context.lineJoin = "round";
-  context.lineCap = "round";
-  context.stroke();
-  points.forEach((p) => {
-    context.beginPath();
-    context.arc(p.x, p.y, 3.2, 0, Math.PI * 2);
-    context.fillStyle = "#fff";
-    context.fill();
-    context.strokeStyle = color;
-    context.lineWidth = 1.8;
-    context.stroke();
-  });
-  context.fillStyle = "#98a69f";
-  context.textAlign = "center";
-  labels.forEach((label, index) => {
-    const x = left + (plotWidth * index) / Math.max(1, labels.length - 1);
-    context.fillText(label, x, height - 8);
-  });
-}
-
-function drawWeeklyChart() {
-  drawLineChart(byId("weeklyChart"), WEEKLY_DEMO, ["W1", "W2", "W3", "W4", "W5", "W6", "W7", "W8"], "#49a87d", true);
 }
 
 function drawPlannerChart(profile) {
@@ -518,7 +443,6 @@ function initialize() {
     setSection("dashboard");
   });
   window.addEventListener("resize", () => {
-    if (document.getElementById("dashboard").classList.contains("active")) drawWeeklyChart();
     drawPlannerChart(state.profile);
   });
   const initialSection = window.location.hash.slice(1);
