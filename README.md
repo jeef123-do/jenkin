@@ -15,7 +15,7 @@ HealthyLife is a friendly, responsive wellness dashboard with a BMI calculator a
 
 ## Technology stack
 
-- Java 21, Spring Boot 3.4.5, Spring MVC, Bean Validation
+- Java 21, Spring Boot 4.0.9, Spring MVC, Bean Validation, Jackson 3
 - Maven, JUnit 5, Spring Boot Test, MockMvc
 - HTML5, CSS3, vanilla JavaScript, Canvas charts (no Node.js build step or chart service)
 - Jenkins Declarative Pipeline and Maven Wrapper (Maven 3.9.9)
@@ -233,7 +233,16 @@ generated before the severity gate so a blocked build retains the findings.
 The JSON-producing scan uses exit code 0 for findings only; the final
 `trivy convert --severity HIGH,CRITICAL --exit-code 1` is the mandatory gate.
 The scanner binary is pinned; vulnerability data changes over time. Existing
-Spring Boot 3.4.5 dependencies may legitimately block deployment.
+dependencies can legitimately block deployment as new advisories are published.
+
+The dependency remediation upgrades the Boot parent from 3.4.5 to **4.0.9**,
+using its coordinated BOM rather than mixing incompatible Framework major
+versions. Boot 3.5.16 still produced blocking findings in the validation scan,
+so the approved major upgrade uses the MVC-specific application/test starters,
+Jackson 3's `tools.jackson.databind.ObjectMapper`, and the relocated MockMvc
+auto-configuration test annotation. Java remains 21 and API response shapes are
+covered by the existing tests. The scanned runtime includes Spring MVC 7.0.10,
+Tomcat 11.0.27 and Jackson Databind 3.1.7.
 
 To run on a compatible Linux agent after packaging:
 
@@ -312,14 +321,21 @@ prune as part of this demo.
 - Trivy 0.76.1 release installation/checksum, vulnerability DB and Java DB
   downloads, and a real packaged-JAR scan were verified on `jenkins-backup`.
   Initial database downloads completed in approximately three minutes on that
-  run (not a guarantee). The scanner identified 35 packages and reported 8
+  run (not a guarantee). Before remediation, the scanner identified 35 packages and reported 8
   CRITICAL, 25 HIGH, 28 MEDIUM and 12 LOW findings; these are report entries,
   not necessarily unique CVEs. The final gate correctly returned exit 1.
-  HTML/JSON/text/inventory reports were generated. No deployment was attempted
-  as part of this scanner validation and no passing security gate is claimed.
+  HTML/JSON/text/inventory reports were generated.
   A filtered nonblocking report fixture returned success; the real report and
-  a missing report returned failure. Fix dependencies before demonstrating
-  successful CI/CD; do not lower severity or ignore findings just to get green.
+  a missing report returned failure.
+- After upgrading to Boot 4.0.9, `clean package` passed all 15 tests, and a real
+  Trivy scan identified 40 packages with **zero vulnerability entries** in the
+  database snapshot used on 2026-10-29. The unchanged HIGH/CRITICAL gate returned
+  exit 0. This is a point-in-time result, not a guarantee of no vulnerabilities.
+  The deliberate test-failure flag still produced exactly one failed test.
+  The new JAR was deployed using the actual deployment script on agent-local
+  port 18082 for isolated validation: health, frontend and BMI calculation
+  succeeded, and cleanup closed the port. The Pipeline default remains 18081.
+  A full SCM-triggered Jenkins run with this upgrade still needs to be executed.
 - Jenkinsfile Groovy syntax parsed successfully with the installed Jenkins
   Groovy version. The authenticated Declarative validator returned HTTP 403
   without credentials; **a full Jenkins Pipeline run has not been verified**.
