@@ -180,9 +180,10 @@ Post actions retain JUnit results and archive `target/*.jar`, available
 including reports produced before a failed security gate. An unavailable
 database/service may prevent report generation; no report does **not** mean a
 successful scan. Retention is 10 builds with artifacts for the latest 5. Builds
-of the same job cannot overlap. The overall timeout is 60 minutes and the scan
-timeout is 45 minutes. Standard Declarative behavior skips dependent stages
-after a failure.
+of the same job cannot overlap. Normal CI/CD has a 60-minute overall timeout
+and a 45-minute scan timeout. Database-preparation mode has a 9-hour overall
+timeout and an 8-hour preparation timeout. Standard Declarative behavior skips
+dependent stages after a failure.
 
 ### Security scanner setup and policy
 
@@ -206,6 +207,47 @@ and timeouts fail the stage rather than producing a green build. The initial NVD
 download can take many minutes; retain the agent's Maven/Dependency-Check cache.
 Serialize scans sharing a writable database across jobs, or give each agent its
 own cache to avoid database locking.
+
+#### First download exceeds the normal scan timeout
+
+Use the separate database-preparation mode when the initial NVD download cannot
+finish within 45 minutes:
+
+1. Commit/push the updated Jenkinsfile and let the job load its new parameter
+   definitions. Changes do not modify an already-running build.
+2. Wait for the current scanner to finish/stop before starting preparation.
+   Never delete the database, its lock, or cache while a scanner is running.
+3. Choose **Build with Parameters**, check `INITIALIZE_NVD_DATABASE`, leave
+   `SIMULATE_TEST_FAILURE` unchecked, and set
+   `NVD_API_KEY_CREDENTIAL_ID=nvd-api-key`.
+4. The job runs **Checkout → Prepare NVD Database** with
+   `sh mvnw -B -Psecurity dependency-check:update-only`. It has up to 8 hours
+   for the initial download. Build/Test/Security Scan/Package/Deploy/Smoke Test
+   are deliberately skipped. This mode publishes neither old test results nor
+   old workspace artifacts and never claims the dependency scan passed.
+5. Only after preparation succeeds, run again with
+   **`INITIALIZE_NVD_DATABASE=false`** to execute normal CI/CD with the real
+   vulnerability gate.
+
+The inspected active container is now `jenkins-backup`, mounting the existing
+`jenkins_home` volume. Its Maven scanner cache is under
+`/var/jenkins_home/.m2/repository/org/owasp/dependency-check-data/`.
+The `11.0` subdirectory is the scanner's data-schema version, not the pinned
+plugin version (13.0.0). Both update-only and normal scan use the same Maven
+profile/default cache; `mvn clean` removes `target`, not this cache.
+The database was approximately 290 MB during inspection, but file existence
+does not prove a complete usable update. An interrupted initial update can
+require downloading records again; it is not guaranteed to resume at the last
+console counter.
+
+At the reported rate of roughly 10,000 records in nine minutes, 416,000 records
+could require several hours; this is only an estimate. Eight hours is a bounded
+first-download allowance, not a speed fix or guarantee. Feed errors/timeouts
+still fail preparation. If progress stalls or HTTP 403/429/retry warnings appear,
+investigate the key, shared API usage, proxy and NVD availability instead of
+repeatedly restarting or reducing the API delay. Serialize other jobs that share
+this database or key. Subsequent builds need the same persistent cache/agent;
+`agent any` does not ensure this in a multi-agent Jenkins installation.
 
 The explicit **7.0** threshold blocks High/Critical findings; Low/Medium findings
 remain visible in reports. Test dependencies are included. No skip flag,
@@ -273,7 +315,8 @@ prune as part of this demo.
 ### Demonstrate a successful and failing build
 
 1. Configure the NVD credential and network prerequisites. Run **Build with
-   Parameters**, `SIMULATE_TEST_FAILURE=false`, `TEST_PORT=18081`,
+   Parameters**, `INITIALIZE_NVD_DATABASE=false`,
+   `SIMULATE_TEST_FAILURE=false`, `TEST_PORT=18081`,
    `NVD_API_KEY_CREDENTIAL_ID=nvd-api-key`. Success requires tests **and a real
    security scan** to pass. If findings block the build, review the HTML report
    and remediate them first; do not bypass the gate.
