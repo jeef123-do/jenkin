@@ -32,8 +32,10 @@ HealthyLife is a friendly, responsive wellness dashboard with a BMI calculator a
 │   ├── SmokeCheck.java
 │   ├── deploy-test.sh
 │   ├── deploy-sit.sh     # persistent Docker Desktop SIT
-│   ├── deploy-prd.sh     # blocked until real infrastructure is configured
+│   ├── deploy-prd.sh     # local PRD simulation on 18083, not real production
 │   ├── sit-environment.sh
+│   ├── prd-environment.sh
+│   ├── compose-environment.sh # shared lifecycle, fixed isolated targets
 │   ├── tests/            # isolated deployment and Pipeline mocks
 │   ├── smoke-test.sh
 │   ├── security-scan.sh
@@ -53,7 +55,7 @@ HealthyLife is a friendly, responsive wellness dashboard with a BMI calculator a
 
 - Java 21 JDK
 - For local builds, Maven is optional; the Maven Wrapper downloads the pinned Maven distribution.
-- For Jenkins, provision a Linux agent labelled `healthylife-docker` with Java 21, `/proc`, POSIX `sh`, `nohup`, GNU `timeout`, `grep`, `tr`, `git`, `sha256sum` and the security-scan tools. SIT additionally needs Docker CLI, Compose v2+ with `up --wait`, and authorized access to the **same Docker Desktop daemon as Windows**. Network access to Maven Central, vulnerability feeds and the base-image registry is required. Maven is downloaded by the wrapper.
+- For Jenkins, provision a Linux agent labelled `healthylife-docker` with Java 21, `/proc`, POSIX `sh`, `nohup`, GNU `timeout`, `grep`, `tr`, `git`, `sha256sum` and the security-scan tools. SIT/local PRD additionally need Docker CLI, Compose v2+ with `up --wait`, and authorized access to the **same Docker Desktop daemon as Windows**. Network access to Maven Central, vulnerability feeds and the base-image registry is required. Maven is downloaded by the wrapper.
 
 The Jenkins pipeline uses `agent { label 'healthylife-docker' }`, not `agent any`. This agent is an infrastructure prerequisite, not created by this repository. The checked-in Maven Wrapper downloads Maven 3.9.9 when needed.
 
@@ -181,7 +183,7 @@ The optional Male/Female selection is saved in `localStorage` and is not sent to
 | Security Scan | Run pinned Trivy **0.76.1** against the packaged JAR. Fail on HIGH/CRITICAL findings or scanner errors; verify the checksum before/after scanning and compare the scan input to the original JAR. |
 | Pipeline Test | For every environment: deploy the packaged JAR on agent loopback port 18081, wait for HTTP readiness, smoke-test, then clean up in `finally`, including failures. |
 | Production Approval | PRD only, after all gates succeed. `input` restricts approval to `release-manager`, with a 15-minute timeout within the existing 60-minute overall timeout. |
-| Deploy | TEST has already finished and been cleaned up. SIT builds the current artifact into an image, waits for container health, then smoke-tests before promotion. PRD fails closed even after approval. |
+| Deploy | TEST has already finished and been cleaned up. SIT or approved local PRD builds the current artifact into its own image, waits for container health, then smoke-tests before promotion. |
 
 Post actions retain JUnit results and archive `target/*.jar`, available
 `target/security/*` (HTML, JSON, text and package inventory), `target/artifact.sha256`
@@ -222,11 +224,13 @@ the Pipeline or control Jenkins. Do not use stage restart to skip required
 gates: restrict restart/replay permissions and use fresh full PRD builds only.
 Do not rebuild or replace the scanned artifact after approval.
 
-**Even approved PRD requests currently fail deliberately without deploying.**
-Provide and review the real PRD endpoint, transport, artifact destination,
-deployment and health/rollback scripts, environment-specific credential IDs,
-agent isolation and authorization before replacing the explicit errors.
-There is no production target and no fallback to SIT. Approval expires after 15
+**`TARGET_ENV=PRD` now deploys a local PRD simulation, not real production.**
+The operator explicitly selected the same Windows Docker Desktop daemon,
+with a separate `healthylife-prd` project / `prd-app` service at
+`http://localhost:18083/`. This replaces the earlier intentional PRD failure.
+It never falls back to SIT. Real production still has no configured target or
+deployment transport and is not deployed by this pipeline.
+Approval expires after 15
 minutes or when the existing overall 60-minute timeout is reached, whichever
 comes first; it does not extend the overall limit. The current top-level agent
 remains allocated during input. The TEST process is already stopped before approval.
@@ -238,23 +242,21 @@ Checkout -> Build -> Test -> Package (one JAR + SHA-256) -> Security Scan
   -> Pipeline Test: temporary deploy -> readiness -> smoke -> finally cleanup
   TEST -> done (no persistent deployment)
   SIT  -> image build -> Compose health/readiness -> container-local smoke -> persist
-  PRD  -> Approval -> explicit failure (production target/method still required)
+  PRD  -> Approval -> local PRD image build -> health/readiness -> smoke -> persist
 ```
 
 `scripts/deploy-test.sh` delegates to the existing temporary deployment.
 `scripts/deploy-sit.sh` delegates to `scripts/sit-environment.sh deploy`.
-`scripts/deploy-prd.sh` remains a nonzero-exit placeholder; approval cannot enable it.
+`scripts/deploy-prd.sh` delegates to `scripts/prd-environment.sh deploy`.
+Both lifecycle wrappers use `scripts/compose-environment.sh`, which accepts
+only fixed SIT/PRD targets and their separate daemon identity settings.
 `scripts/smoke-test.sh TEST` checks the owned temporary process.
 `scripts/smoke-test.sh SIT` uses Compose exec to run the existing Java HTTP
 checker inside `sit-app`, after Compose health readiness. No agent-to-Windows
-HTTP route or extra published port is required.
-The future PRD remote checker still requires a non-loopback HTTPS endpoint, no embedded credentials,
-query or fragment, a trusted TLS certificate, HTTP 200 and the existing
-`"status":"UP"` response contract. HTTP redirects are not followed. An unreachable
-endpoint or wrong response eventually exits nonzero. An authenticated health
-endpoint needs a reviewed credential-aware client implementation first; do not
-put a token in the URL. DNS/network egress policies must ensure the configured
-hostname actually refers to the intended environment.
+HTTP route or extra published port is required. `scripts/smoke-test.sh PRD`
+does the same inside `prd-app`, never inside SIT. Both require HTTP 200 and
+the existing `"status":"UP"` response contract. An unreachable endpoint or
+wrong response eventually exits nonzero.
 
 | Variable / setting | Source | Required value |
 | --- | --- | --- |
@@ -264,20 +266,21 @@ hostname actually refers to the intended environment.
 | `ARTIFACT_PATH` | Fixed Jenkinsfile environment | `target/jenkins-java-maven-demo-1.0.0.jar`; shared by scanner/deploy scripts, not a build parameter. |
 | `BUILD_TAG` | Jenkins built-in | Identifies only this build's temporary TEST process. |
 | `SIT_DOCKER_ENGINE_ID` | Trusted job/folder or agent configuration | Required Docker Desktop engine ID; mismatch or missing value blocks every SIT action before changing resources. This is an identity check, not a credential. |
-| `PRD_HEALTH_URL` | Trusted release job/folder configuration | Actual reachable PRD HTTPS health URL; unset by default. |
+| `PRD_DOCKER_ENGINE_ID` | Trusted job/folder or agent configuration | Required independently for local PRD. Set to the same verified Desktop ID as SIT; never falls back to `SIT_DOCKER_ENGINE_ID`. |
 | Docker transport | Administrator-managed agent configuration | Authorized socket or TLS-backed connection to Windows Docker Desktop; never an unauthenticated TCP daemon. |
-| PRD target / transport / destination | Not yet defined | Approved real server/platform and immutable artifact destination; never derived from user input. |
+| Local PRD target | Fixed Compose configuration | Same Desktop daemon, project `healthylife-prd`, service `prd-app`, `127.0.0.1:18083:8080`. Not a real production target. |
+| Real production target / transport / destination | Not yet defined | Requires separate infrastructure design and review; no real production deployment is implemented. |
 | Application configuration | Target-managed config or Jenkins secret file | Separate environment settings/profile, service account, ports, TLS and secret injection; never baked into the JAR. |
 | Credential IDs | Trusted deployment code/config after review | Separate real TEST/SIT/PRD IDs of the appropriate type; none invented here. |
 
-Before replacing the PRD placeholder, define transfer authentication, verified SSH
+Before implementing real production deployment, define transfer authentication, verified SSH
 host keys or platform TLS trust, process/service/container ownership, release
 activation, artifact checksum verification on the target, rollback, health URL
 and least-privilege network access. The script must deploy `ARTIFACT_PATH`
-without running Maven or replacing/rebuilding the JAR. SIT Docker builds copy
+without running Maven or replacing/rebuilding the JAR. SIT/local PRD Docker builds copy
 the current tested/scanned JAR, not a separately Maven-built artifact. Different environments
 must use the same artifact format/bytes with external configuration. Each run
-tests temporarily and optionally deploys SIT; promotion across runs additionally requires a trusted
+tests temporarily and optionally deploys SIT or local PRD; promotion across runs additionally requires a trusted
 immutable artifact store and digest selection, not another checkout/rebuild.
 The local checksum protects accidental replacement, not a malicious editor of
 the Pipeline or checksum file. Remote delivery verification remains part of the
@@ -410,8 +413,82 @@ Start-Process 'http://localhost:18082/'
 Compose requires an explicit image even for `ps`. Expect a healthy
 `sit-app`, `127.0.0.1:18082->8080/tcp`, and HTTP 200 `{"status":"UP"}`.
 If `localhost` resolves to IPv6 only, try `127.0.0.1`; do not widen the bind
-address as a workaround. This change does not claim that 18082 is currently
-open: no real SIT deployment is performed during validation.
+address as a workaround. During the latest read-only inspection, the existing
+`healthylife-sit-sit-app-1` was running with `127.0.0.1:18082->8080/tcp`,
+alongside the separate agent and controller. This PRD change does not restart
+or update that service and does not claim fresh browser/readiness validation.
+
+### Local PRD simulation on port 18083
+
+| Environment | Resource | URL / lifecycle |
+| --- | --- | --- |
+| Pipeline Test | Agent-local temporary process | `127.0.0.1:18081`, always cleaned up before persistent deploy |
+| SIT | `healthylife-sit` / `sit-app` | Windows `http://localhost:18082/`, persistent |
+| Local PRD simulation | `healthylife-prd` / `prd-app` | Windows `http://localhost:18083/`, persistent, Jenkins approval required |
+
+SIT and local PRD use the same Dockerfile and application port 8080, but
+different Compose files, default networks, services, image repositories and
+rollback tags. PRD cannot stop/replace SIT through these scripts, and Pipeline
+Test cleanup does not operate on either Compose project. They share a daemon,
+so they are **not a security boundary or separate production infrastructure**.
+
+Before the first local PRD build, add `PRD_DOCKER_ENGINE_ID` under trusted
+Jenkins node/job/folder environment configuration. Obtain and compare the
+current daemon ID from Windows and the agent, as for SIT above. It must identify
+the same Windows Desktop daemon; missing/mismatched values fail before any
+container change. Existing SIT configuration is unchanged. No secret is needed
+for this identity value; any future secrets must use Jenkins Credentials or
+a secret manager, not source, Compose values or logs.
+
+After review, commit/push and load the updated Jenkinsfile, choose
+`TARGET_ENV=PRD`, leave `SIMULATE_TEST_FAILURE=false`, and run a complete build.
+All existing tests, Trivy and temporary readiness/smoke/cleanup must pass before
+the approval prompt. An authorized approval now permits **actual local PRD
+container creation/update** on Desktop, explicitly labelled as a simulation.
+An abort/timeout blocks it. Do not select PRD merely to demonstrate a failure:
+it is no longer an intentional failure placeholder.
+
+Lifecycle commands below are instructions only, not validation actions.
+Run from the repository root in an authorized Linux shell with the PRD daemon
+setting configured. Manual operations are privileged operator actions outside
+the Jenkins approval mechanism; restrict access accordingly.
+
+```sh
+# Build the current JAR with tests and Trivy/checksum steps shown for SIT above.
+# Then build a new PRD image and start/update only PRD:
+sh scripts/deploy-prd.sh
+sh scripts/prd-environment.sh status
+sh scripts/prd-environment.sh logs
+sh scripts/smoke-test.sh PRD
+sh scripts/prd-environment.sh stop
+sh scripts/prd-environment.sh start
+sh scripts/prd-environment.sh rollback
+```
+
+Local PRD retains `healthylife-prd:current` and `healthylife-prd:previous`,
+independently of SIT images. It always builds the current packaged/scanned JAR
+before deploy, waits for Compose health, then smokes through exec inside
+`prd-app` at `http://127.0.0.1:8080/api/health`. Agent localhost is not Windows;
+no separate agent-to-Windows HTTP route is assumed. Failed activation attempts
+restoration of PRD's preceding image and still fails the request. Stop/rollback
+do not remove volumes or browser data. The same storage/schema and
+single-operator limitations described for SIT apply.
+
+After an authorized local PRD deployment, verify from Windows:
+
+```powershell
+$env:PRD_IMAGE='healthylife-prd:current'
+docker --context desktop-linux compose --project-name healthylife-prd --file compose.prd.yaml ps
+Test-NetConnection 127.0.0.1 -Port 18083
+curl.exe --fail-with-body http://127.0.0.1:18083/api/health
+Start-Process 'http://localhost:18083/'
+```
+
+Expect a healthy `prd-app`, `127.0.0.1:18083->8080/tcp` and HTTP 200
+`{"status":"UP"}`. This loopback-only publish does not intentionally expose PRD
+to the LAN. Browser localStorage is origin-specific, so 18083 does not share
+SIT settings. No PRD deployment or real service change is performed while
+validating this implementation.
 
 ### Required Jenkins authorization and credentials (outside Jenkinsfile)
 
@@ -450,7 +527,7 @@ open: no real SIT deployment is performed during validation.
 | --- | --- | --- |
 | TEST | None: loopback deployment uses no login or secret. | If remote deployment is added, create a TEST-only service identity and TEST-only credential. Never reuse SIT/PRD credentials. |
 | SIT | Authorized access from the labelled Linux agent to the agreed Desktop daemon; no application secret today. | Use isolated agent permissions and protected Jenkins credentials for TLS/registry/application secrets when required. |
-| PRD | Not configured; approval cannot enable deployment. | Create a least-privilege PRD service identity/credential in the restricted release folder/job, unavailable to TEST/SIT or untrusted SCM jobs. |
+| PRD | Local simulation: separately verified Desktop engine ID plus Jenkins approval. No real production credentials are used. | Real production needs a separate least-privilege identity, protected release job/agents and target, unavailable to TEST/SIT or untrusted SCM jobs. |
 | SCM | Optional credential for private checkout, managed by the job. | Read-only repository access; not a deployment identity. |
 
 Select binding by the actual deployment transport: `sshUserPrivateKey` for
@@ -491,10 +568,11 @@ Run on an isolated authorized Jenkins job, not against live production:
    and confirm Deploy has not started. Attempt approval via both UI and
    the input HTTP API with an unauthorized non-admin account; neither may
    advance the run. Selecting PRD or starting a build must not change this.
-5. Approve using a verified release-manager account. Only then may PRD Deploy
-   start; it must currently fail as not configured with no network deploy
-   or PRD credential binding. After real wiring, verify the approved artifact
-   fingerprint, audit record, target identity and target health.
+5. In mocks, approve using the permitted input path. Only then may local PRD
+   Deploy start, after TEST cleanup, without invoking SIT. After separately
+   authorized real local deployment, verify its artifact, identity, port 18083
+   and container health. Verify release-manager/non-admin ACLs in Jenkins;
+   administrator approval alone does not establish those restrictions.
 6. Abort input and let it time out in separate runs. Require an aborted run,
    skipped PRD deploy and preserved post, with no credential use or remote shutdown.
 7. Set `SIMULATE_TEST_FAILURE=true` with PRD requested. Test must fail before
@@ -518,7 +596,8 @@ Run on an isolated authorized Jenkins job, not against live production:
 11. In mocks, verify image build precedes readiness, readiness precedes smoke,
     a failed SIT activation attempts the previous image and still fails, and
     no post action stops SIT. Test real SIT acceptance only after authorization.
-    PRD remains blocked until its real target and method are reviewed.
+    Local PRD must use its own Compose project and recovery image, not SIT.
+    Real production remains unconfigured and is not deployed.
 
 ### Security scanner setup and policy
 
@@ -655,6 +734,8 @@ and Node.js (no dependency installation required):
 node --test scripts\tests\environments.test.cjs
 $env:SIT_IMAGE='healthylife-sit:syntax-only'
 docker compose --project-name healthylife-sit --file compose.sit.yaml config --quiet
+$env:PRD_IMAGE='healthylife-prd:syntax-only'
+docker compose --project-name healthylife-prd --file compose.prd.yaml config --quiet
 git diff --check
 ```
 
@@ -663,7 +744,8 @@ The mock suite never invokes a real Docker daemon, starts an application or
 deploys a service. It covers build/checksum gates, wait-before-smoke,
 daemon identity rejection, failed readiness/smoke recovery, failed restoration,
 first-deploy failure, manual rollback, lifecycle/resource isolation, PID safety,
-idempotent cleanup and blocked PRD. Compose `config` only parses configuration.
+idempotent cleanup, approved local PRD dispatch and SIT/PRD resource isolation.
+Compose `config` only parses configuration.
 The Groovy harness in `scripts/tests/pipeline-mocks.groovy` parses the current
 Jenkinsfile and exercises mocked commands/approval/cleanup. It requires an
 existing Groovy 2.4+ runtime and the current Jenkinsfile in Base64 system
@@ -675,12 +757,12 @@ $pipeline = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD\Jenkinsfile"
 groovy "-Dhealthylife.pipeline=$pipeline" .\scripts\tests\pipeline-mocks.groovy
 ```
 
-Current checks passed: 28 Node/shell contract and lifecycle cases, 31 Groovy
+Current local PRD checks: 51 Node/shell contract and lifecycle cases, 32 Groovy
 Pipeline cases, shell syntax, Compose config and `git diff --check`.
 The unauthenticated Declarative validator returned HTTP 403.
 Groovy parsing and mock execution are **not** Jenkins CPS/Declarative validation.
 Use the authenticated HTTP validator documented below before a real build.
-No actual SIT build/deploy, readiness HTTP request, rollback, Maven test rerun,
+No actual SIT/PRD build/deploy, readiness HTTP request, rollback, Maven test rerun,
 Trivy scan or browser reachability is claimed by mock validation.
 
 ### Historical validation (before environment separation)
@@ -793,9 +875,9 @@ From this existing repository, review only intended changes, commit and push:
 ```powershell
 git status --short
 git diff --check
-git diff -- Jenkinsfile Dockerfile compose.sit.yaml .dockerignore scripts README.md
-git add Jenkinsfile Dockerfile compose.sit.yaml .dockerignore scripts/deploy-sit.sh scripts/sit-environment.sh scripts/smoke-test.sh scripts/test-environment.sh scripts/tests README.md
-git commit -m "Separate temporary Pipeline Test from persistent SIT" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+git diff -- Jenkinsfile compose.sit.yaml compose.prd.yaml scripts README.md
+git add Jenkinsfile compose.prd.yaml scripts/compose-environment.sh scripts/deploy-prd.sh scripts/prd-environment.sh scripts/sit-environment.sh scripts/smoke-test.sh scripts/tests README.md
+git commit -m "Add isolated local PRD simulation on port 18083" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 git push -u origin main
 ```
 

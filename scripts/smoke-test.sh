@@ -9,8 +9,7 @@ case "${1:-}" in
         exec sh scripts/sit-environment.sh smoke
         ;;
     PRD)
-        : "${PRD_HEALTH_URL:?Configure the actual PRD HTTPS health endpoint}"
-        exec java scripts/SmokeCheck.java "$PRD_HEALTH_URL" remote
+        exec sh scripts/prd-environment.sh smoke
         ;;
     *)
         echo "HealthyLife smoke test: environment must be TEST, SIT or PRD." >&2

@@ -13,7 +13,7 @@ pipeline {
     }
     parameters {
         choice(name: 'TARGET_ENV', choices: ['TEST', 'SIT', 'PRD'],
-               description: 'All requests run temporary Pipeline Test first. SIT persists on Docker Desktop; PRD remains blocked.')
+               description: 'All requests run temporary Pipeline Test first. SIT: localhost:18082. PRD: approved local simulation on localhost:18083, not real production.')
         booleanParam(name: 'SIMULATE_TEST_FAILURE', defaultValue: false,
                      description: 'Tick only to demonstrate the failing Test stage.')
     }
@@ -105,8 +105,8 @@ pipeline {
                     if (currentBuild.currentResult != 'SUCCESS') {
                         error('Production approval requires successful Build, Test, Package and Security Scan.')
                     }
-                    input message: "Approve PRD request for ${env.JOB_NAME} #${env.BUILD_NUMBER}? Infrastructure is not configured; approval will not deploy.",
-                          ok: 'Approve PRD request',
+                    input message: "Approve local PRD simulation for ${env.JOB_NAME} #${env.BUILD_NUMBER} on localhost:18083? This deploys a separate Docker Desktop service, not real production.",
+                          ok: 'Deploy local PRD',
                           submitter: 'release-manager'
                     productionApproved = true
                 }
@@ -145,7 +145,7 @@ pipeline {
             archiveArtifacts artifacts: 'target/*.jar,target/artifact.sha256,target/security/*,target/deployment/*.log',
                              allowEmptyArchive: true,
                              fingerprint: true
-            echo 'Pipeline Test is temporary. SIT persists independently on Docker Desktop. PRD requires a real target and deployment method.'
+            echo 'Pipeline Test is temporary. SIT (18082) and approved local PRD simulation (18083) persist independently. No real production deployment is configured.'
         }
         success {
             echo 'HealthyLife CI/CD passed: tests, Trivy security gate, selected deployment and deployed-service health check.'

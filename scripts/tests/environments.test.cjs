@@ -47,18 +47,24 @@ case "$*" in
 esac
 `;
 
-function fixture(t) {
+function fixture(t, environment = 'SIT') {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'healthylife-mocks-'));
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
     fs.mkdirSync(path.join(dir, 'bin'));
     fs.mkdirSync(path.join(dir, 'target', 'deployment'), { recursive: true });
     fs.cpSync(path.join(root, 'scripts'), path.join(dir, 'scripts'), { recursive: true });
     fs.copyFileSync(path.join(root, 'compose.sit.yaml'), path.join(dir, 'compose.sit.yaml'));
+    fs.copyFileSync(path.join(root, 'compose.prd.yaml'), path.join(dir, 'compose.prd.yaml'));
     const jar = Buffer.from('mock JAR only; never run an application');
     fs.writeFileSync(path.join(dir, 'target', 'jenkins-java-maven-demo-1.0.0.jar'), jar);
     fs.writeFileSync(path.join(dir, 'target', 'artifact.sha256'),
         `${createHash('sha256').update(jar).digest('hex')}  target/jenkins-java-maven-demo-1.0.0.jar\n`);
-    fs.writeFileSync(path.join(dir, 'bin', 'docker'), dockerMock, { mode: 0o755 });
+    const mock = environment === 'PRD'
+        ? dockerMock.replaceAll('SIT_IMAGE', 'PRD_IMAGE').replaceAll('healthylife-sit', 'healthylife-prd')
+            .replaceAll('compose.sit.yaml', 'compose.prd.yaml').replaceAll('sit-app', 'prd-app')
+            .replaceAll('sit-container', 'prd-container')
+        : dockerMock;
+    fs.writeFileSync(path.join(dir, 'bin', 'docker'), mock, { mode: 0o755 });
     fs.writeFileSync(path.join(dir, 'bin', 'git'), '#!/bin/sh\necho abc123\n', { mode: 0o755 });
     fs.writeFileSync(path.join(dir, 'bin', 'uname'), '#!/bin/sh\necho Linux\n', { mode: 0o755 });
     fs.writeFileSync(path.join(dir, 'bin', 'java'), '#!/bin/sh\necho "Unexpected host Java invocation" >&2\nexit 99\n', { mode: 0o755 });
@@ -75,6 +81,9 @@ function fixture(t) {
                     MOCK_BIN: shellPath(path.join(dir, 'bin')),
                     MOCK_LOG: posix(log),
                     SIT_DOCKER_ENGINE_ID: 'desktop-test',
+                    PRD_DOCKER_ENGINE_ID: 'desktop-test',
+                    SIT_IMAGE: '',
+                    PRD_IMAGE: '',
                     BUILD_TAG: 'mock-build',
                     TEST_PORT: '18081',
                     ...extra,
@@ -236,11 +245,109 @@ for (const pid of ['1', 'invalid', '0']) {
     });
 }
 
-test('PRD stays blocked and cannot fall back to SIT', t => {
-    const result = fixture(t).run('scripts/deploy-prd.sh', '');
+test('local PRD builds, waits, smokes and promotes only its own image', t => {
+    const result = fixture(t, 'PRD').run('scripts/deploy-prd.sh', '');
+    assert.equal(result.status, 0, result.stderr);
+    const index = value => result.log.indexOf(value);
+    assert(index('build --pull prd-app') >= 0);
+    assert(index('build --pull prd-app') < index('image tag sha256:old healthylife-prd:previous'));
+    assert(index('image tag sha256:old healthylife-prd:previous') < index('up --detach'));
+    assert(index('up --detach') < index('exec -T prd-app java'));
+    assert(index('exec -T prd-app java') < index('image tag sha256:candidate healthylife-prd:current'));
+    assert.match(result.stdout, /local PRD simulation.*not a real production target/);
+    assert.match(result.stdout, /http:\/\/localhost:18083/);
+    assert.doesNotMatch(result.log, /sit-app|healthylife-sit|compose\.sit|18081|\bdown\b|--volumes/);
+});
+
+for (const failure of ['MOCK_READINESS_FAIL', 'MOCK_SMOKE_FAIL']) {
+    for (const action of ['deploy', 'rollback']) {
+        test(`local PRD ${action} ${failure} restores PRD only and still fails`, t => {
+            const result = fixture(t, 'PRD').run('scripts/prd-environment.sh', action, { [failure]: '1' });
+            assert.notEqual(result.status, 0);
+            assert.match(result.log, /sha256:old \| .*up --detach --no-build --wait/);
+            assert.match(result.stderr, /PRD restored; the requested update still failed/);
+            assert.doesNotMatch(result.log, /image tag sha256:(candidate|previous) healthylife-prd:current|healthylife-sit|\bdown\b/);
+        });
+    }
+}
+
+for (const [extra, expected] of [
+    [{ PRD_DOCKER_ENGINE_ID: '' }, /trusted Docker Desktop engine ID/],
+    [{ PRD_DOCKER_ENGINE_ID: 'wrong', SIT_DOCKER_ENGINE_ID: 'desktop-test' }, /Wrong Docker daemon/],
+    [{ MOCK_DAEMON_DOWN: '1' }, /Cannot access the Docker daemon/],
+    [{ MOCK_ENGINE_OS: 'Other Linux' }, /Windows Docker Desktop target/],
+]) {
+    test(`local PRD preflight rejects ${JSON.stringify(extra)} without SIT fallback`, t => {
+        const result = fixture(t, 'PRD').run('scripts/prd-environment.sh', 'deploy', extra);
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, expected);
+        assert.doesNotMatch(result.log, /--project-name|image tag|healthylife-sit/);
+    });
+}
+
+for (const failure of ['MOCK_CONFIG_FAIL', 'MOCK_BUILD_FAIL']) {
+    test(`local PRD ${failure} leaves running services untouched`, t => {
+        const result = fixture(t, 'PRD').run('scripts/prd-environment.sh', 'deploy', { [failure]: '1' });
+        assert.notEqual(result.status, 0);
+        assert.doesNotMatch(result.log, /up --detach|image tag|healthylife-sit/);
+    });
+}
+
+test('local PRD checksum mismatch blocks image build and activation', t => {
+    const f = fixture(t, 'PRD');
+    fs.appendFileSync(path.join(f.dir, 'target', 'jenkins-java-maven-demo-1.0.0.jar'), 'changed');
+    const result = f.run('scripts/prd-environment.sh', 'deploy');
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /PRD deployment is not configured/);
-    assert.equal(result.log, '');
+    assert.doesNotMatch(result.log, /build --pull|up --detach|image tag/);
+});
+
+for (const action of ['start', 'stop', 'status', 'logs', 'smoke', 'rollback']) {
+    test(`local PRD ${action} cannot operate on SIT`, t => {
+        const result = fixture(t, 'PRD').run('scripts/prd-environment.sh', action);
+        assert.equal(result.status, 0, result.stderr);
+        assert.match(result.log, /--project-name healthylife-prd --file compose.prd.yaml/);
+        assert.doesNotMatch(result.log, /sit-app|healthylife-sit|compose\.sit|\bdown\b|--volumes|build --pull/);
+        if (action === 'rollback') {
+            assert.match(result.log, /sha256:previous \| .*up --detach/);
+            assert.match(result.log, /image tag sha256:previous healthylife-prd:current/);
+            assert.match(result.log, /image tag sha256:old healthylife-prd:previous/);
+        }
+    });
+}
+
+test('PRD smoke dispatcher uses PRD container rather than a remote URL or SIT', t => {
+    const result = fixture(t, 'PRD').run('scripts/smoke-test.sh', 'PRD');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.log, /exec -T prd-app java .* http:\/\/127.0.0.1:8080\/api\/health/);
+    assert.doesNotMatch(result.log, /healthylife-sit/);
+});
+
+test('SIT does not require the separate PRD daemon setting', t => {
+    const result = fixture(t).run('scripts/sit-environment.sh', 'status', { PRD_DOCKER_ENGINE_ID: '' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.log, /healthylife-prd|prd-app/);
+});
+
+test('local PRD first activation failure reports no preceding release', t => {
+    const result = fixture(t, 'PRD').run('scripts/prd-environment.sh', 'deploy',
+        { MOCK_NO_CONTAINER: '1', MOCK_READINESS_FAIL: '1' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /no preceding deployment exists/);
+    assert.doesNotMatch(result.log, /image tag|healthylife-sit/);
+});
+
+test('local PRD missing rollback version cannot alter either service', t => {
+    const result = fixture(t, 'PRD').run('scripts/prd-environment.sh', 'rollback', { MOCK_NO_PREVIOUS: '1' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /No previous PRD image/);
+    assert.doesNotMatch(result.log, /up --detach|image tag|healthylife-sit/);
+});
+
+test('local PRD failed recovery explicitly requires operator intervention', t => {
+    const result = fixture(t, 'PRD').run('scripts/prd-environment.sh', 'deploy',
+        { MOCK_READINESS_FAIL: '1', MOCK_RESTORE_FAIL: '1' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /PRD restoration failed; operator intervention/);
 });
 
 test('Compose contract isolates host exposure, health, lifecycle and storage', () => {
@@ -254,4 +361,16 @@ test('Compose contract isolates host exposure, health, lifecycle and storage', (
     assert.doesNotMatch(compose, /18081|container_name:|network_mode:|volumes:/);
     assert.match(dockerfile, /"--server.port=8080"/);
     assert.match(dockerfile, /COPY target\/jenkins-java-maven-demo-1.0.0.jar application.jar/);
+});
+
+test('local PRD Compose uses its own project, service and loopback port with the same Dockerfile', () => {
+    const compose = fs.readFileSync(path.join(root, 'compose.prd.yaml'), 'utf8');
+    assert.match(compose, /name: healthylife-prd/);
+    assert.match(compose, /prd-app:/);
+    assert.match(compose, /\$\{PRD_IMAGE:\?/);
+    assert.match(compose, /dockerfile: Dockerfile/);
+    assert.match(compose, /127\.0\.0\.1:18083:8080/);
+    assert.match(compose, /restart: unless-stopped/);
+    assert.match(compose, /healthcheck:[\s\S]*http:\/\/127\.0\.0\.1:8080\/api\/health/);
+    assert.doesNotMatch(compose, /18081|18082|SIT_IMAGE|sit-app|volumes:|container_name:|network_mode:/);
 });
