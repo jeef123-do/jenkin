@@ -1,0 +1,8 @@
+**
+!Dockerfile
+!target/
+target/**
+!target/jenkins-java-maven-demo-1.0.0.jar
+!scripts/
+scripts/**
+!scripts/SmokeCheck.java

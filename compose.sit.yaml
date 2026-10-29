@@ -1,0 +1,24 @@
+name: healthylife-sit
+services:
+  sit-app:
+    image: ${SIT_IMAGE:?Use scripts/sit-environment.sh to select a built version}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:18082:8080"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "java", "/opt/healthylife/SmokeCheck.java", "http://127.0.0.1:8080/api/health"]
+      interval: 10s
+      timeout: 45s
+      start_period: 30s
+      retries: 3

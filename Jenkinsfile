@@ -2,7 +2,7 @@ def productionApproved = false
 def temporaryTestStarted = false
 
 pipeline {
-    agent any
+    agent { label 'healthylife-docker' }
     options {
         timestamps()
         disableConcurrentBuilds()
@@ -13,14 +13,13 @@ pipeline {
     }
     parameters {
         choice(name: 'TARGET_ENV', choices: ['TEST', 'SIT', 'PRD'],
-               description: 'Deployment request, not authorization. TEST is temporary on this agent; SIT/PRD require infrastructure wiring.')
+               description: 'All requests run temporary Pipeline Test first. SIT persists on Docker Desktop; PRD remains blocked.')
         booleanParam(name: 'SIMULATE_TEST_FAILURE', defaultValue: false,
                      description: 'Tick only to demonstrate the failing Test stage.')
-        string(name: 'TEST_PORT', defaultValue: '18081',
-               description: 'Temporary test application port on the Linux agent (not Jenkins port 8080).')
     }
     environment {
         ARTIFACT_PATH = 'target/jenkins-java-maven-demo-1.0.0.jar'
+        TEST_PORT = '18081'
     }
     stages {
         stage('Checkout') {
@@ -77,6 +76,23 @@ pipeline {
                 '''
             }
         }
+        stage('Pipeline Test') {
+            steps {
+                script {
+                    if (currentBuild.currentResult != 'SUCCESS') {
+                        error('Pipeline Test requires successful Build, Test, Package and Security Scan.')
+                    }
+                    temporaryTestStarted = true
+                    try {
+                        sh 'sh scripts/deploy-test.sh'
+                        sh 'sh scripts/smoke-test.sh TEST'
+                    } finally {
+                        sh 'sh scripts/test-environment.sh cleanup'
+                        temporaryTestStarted = false
+                    }
+                }
+            }
+        }
         stage('Production Approval') {
             when {
                 expression { params.TARGET_ENV == 'PRD' }
@@ -108,33 +124,13 @@ pipeline {
                     sh 'sha256sum --check target/artifact.sha256'
                     switch (params.TARGET_ENV) {
                         case 'TEST':
-                            temporaryTestStarted = true
-                            sh 'sh scripts/deploy-test.sh'
+                            echo 'Pipeline Test passed and was cleaned up. No persistent TEST deployment.'
                             break
                         case 'SIT':
                             sh 'sh scripts/deploy-sit.sh'
                             break
                         case 'PRD':
                             sh 'sh scripts/deploy-prd.sh'
-                            break
-                        default:
-                            error('TARGET_ENV must be TEST, SIT or PRD.')
-                    }
-                }
-            }
-        }
-        stage('Smoke Test') {
-            steps {
-                script {
-                    switch (params.TARGET_ENV) {
-                        case 'TEST':
-                            sh 'sh scripts/smoke-test.sh TEST'
-                            break
-                        case 'SIT':
-                            sh 'sh scripts/smoke-test.sh SIT'
-                            break
-                        case 'PRD':
-                            sh 'sh scripts/smoke-test.sh PRD'
                             break
                         default:
                             error('TARGET_ENV must be TEST, SIT or PRD.')
@@ -149,7 +145,7 @@ pipeline {
             archiveArtifacts artifacts: 'target/*.jar,target/artifact.sha256,target/security/*,target/deployment/*.log',
                              allowEmptyArchive: true,
                              fingerprint: true
-            echo 'HealthyLife CI/CD pipeline execution finished. TEST deployment is temporary; SIT/PRD deployment is not configured.'
+            echo 'Pipeline Test is temporary. SIT persists independently on Docker Desktop. PRD requires a real target and deployment method.'
         }
         success {
             echo 'HealthyLife CI/CD passed: tests, Trivy security gate, selected deployment and deployed-service health check.'
@@ -159,7 +155,7 @@ pipeline {
         }
         cleanup {
             script {
-                if (temporaryTestStarted && fileExists('scripts/test-environment.sh')) {
+                if (temporaryTestStarted) {
                     sh 'sh scripts/test-environment.sh cleanup'
                 }
             }

@@ -31,8 +31,10 @@ HealthyLife is a friendly, responsive wellness dashboard with a BMI calculator a
 ├── scripts/
 │   ├── SmokeCheck.java
 │   ├── deploy-test.sh
-│   ├── deploy-sit.sh     # blocked until real infrastructure is configured
+│   ├── deploy-sit.sh     # persistent Docker Desktop SIT
 │   ├── deploy-prd.sh     # blocked until real infrastructure is configured
+│   ├── sit-environment.sh
+│   ├── tests/            # isolated deployment and Pipeline mocks
 │   ├── smoke-test.sh
 │   ├── security-scan.sh
 │   └── test-environment.sh
@@ -51,9 +53,9 @@ HealthyLife is a friendly, responsive wellness dashboard with a BMI calculator a
 
 - Java 21 JDK
 - For local builds, Maven is optional; the Maven Wrapper downloads the pinned Maven distribution.
-- For Jenkins, use a Linux agent with Java 21, `/proc`, POSIX `sh`, `nohup`, GNU `timeout`, `grep`, and `tr`. Network access to Maven Central and vulnerability feeds is required. Maven and Docker do not need to be installed on that agent.
+- For Jenkins, provision a Linux agent labelled `healthylife-docker` with Java 21, `/proc`, POSIX `sh`, `nohup`, GNU `timeout`, `grep`, `tr`, `git`, `sha256sum` and the security-scan tools. SIT additionally needs Docker CLI, Compose v2+ with `up --wait`, and authorized access to the **same Docker Desktop daemon as Windows**. Network access to Maven Central, vulnerability feeds and the base-image registry is required. Maven is downloaded by the wrapper.
 
-The Jenkins pipeline uses `agent any`; Java 21 must be available on the selected agent. The checked-in Maven Wrapper downloads Maven 3.9.9 when needed.
+The Jenkins pipeline uses `agent { label 'healthylife-docker' }`, not `agent any`. This agent is an infrastructure prerequisite, not created by this repository. The checked-in Maven Wrapper downloads Maven 3.9.9 when needed.
 
 ## Run locally in VS Code
 
@@ -162,8 +164,8 @@ The optional Male/Female selection is saved in `localStorage` and is not sent to
 ## Jenkins: Pipeline script from SCM
 
 1. Push the updated project to GitHub with `pom.xml` and `Jenkinsfile` at its root.
-2. Ensure the agent meets the Linux prerequisites above. The inspected `jenkins` container has Java 21, Maven 3.9.9 and GNU `timeout`, but **neither Docker CLI nor a Docker socket**. Host Docker access does not imply Jenkins Docker access. No Docker Pipeline plugin or `agent { docker { ... } }` syntax is used.
-3. Allow the Trivy release/database downloads described below. Jenkins needs Declarative Pipeline, Pipeline: Input Step, Git, JUnit and Timestamper plugins. Future credential-backed deployments also need Credentials and Credentials Binding. No scanner Jenkins plugin, Docker daemon or NVD credential is required.
+2. Ensure the selected agent meets the prerequisites above. The currently running controller is `jenkins-backup`; it has **neither Docker CLI nor a mounted Docker socket**. Windows Docker access does not imply Jenkins Docker access. Provision the labelled agent and its daemon access outside this repository; no controller/socket/host configuration is changed here. No Docker Pipeline plugin is used.
+3. Allow the Trivy release/database downloads described below. Jenkins needs Declarative Pipeline, Pipeline: Input Step, Git, JUnit and Timestamper plugins. Credential-backed transports also need Credentials and Credentials Binding. No scanner plugin or NVD credential is required. Docker is needed for SIT, not for the temporary Pipeline Test.
 4. Create a **Pipeline** job or edit the existing one. Choose **Pipeline script from SCM**, select **Git**, and use `https://github.com/jeef123-do/jenkin.git` with repository credentials if needed.
 5. Set **Branch Specifier** to `*/main` and **Script Path** to `Jenkinsfile`, then save.
 6. Select **Build Now** once to load updated parameter definitions, then use **Build with Parameters**. The first run may fail closed while parameters refresh. Select `TARGET_ENV`; the old `DEPLOY_ENV` parameter is no longer used and must not be used by API callers.
@@ -177,9 +179,9 @@ The optional Male/Female selection is saved in `localStorage` and is not sent to
 | Test | Run the suite, preserving `SIMULATE_TEST_FAILURE`. |
 | Package | Package once and record `target/artifact.sha256` for the tested JAR. |
 | Security Scan | Run pinned Trivy **0.76.1** against the packaged JAR. Fail on HIGH/CRITICAL findings or scanner errors; verify the checksum before/after scanning and compare the scan input to the original JAR. |
+| Pipeline Test | For every environment: deploy the packaged JAR on agent loopback port 18081, wait for HTTP readiness, smoke-test, then clean up in `finally`, including failures. |
 | Production Approval | PRD only, after all gates succeed. `input` restricts approval to `release-manager`, with a 15-minute timeout within the existing 60-minute overall timeout. |
-| Deploy | Check successful gates, PRD approval when needed, and JAR checksum; dispatch only the selected environment script. TEST is temporary; SIT/PRD scripts explicitly fail until implemented. |
-| Smoke Test | Dispatch only the selected environment check after successful deployment. TEST checks its owned local process; SIT/PRD use their actual configured HTTPS health endpoints. |
+| Deploy | TEST has already finished and been cleaned up. SIT builds the current artifact into an image, waits for container health, then smoke-tests before promotion. PRD fails closed even after approval. |
 
 Post actions retain JUnit results and archive `target/*.jar`, available
 `target/security/*` (HTML, JSON, text and package inventory), `target/artifact.sha256`
@@ -201,9 +203,10 @@ deployment, deploy credentials or SIT implementation. Jenkins job ACLs,
 credential stores and infrastructure permissions are not defined in this
 repository and cannot be verified from this file.
 
-Only the selected environment is deployed and smoke-tested. SIT/PRD never start
-the temporary TEST process. There is no approval for TEST or SIT. SIT requests
-fail explicitly in Deploy because no SIT target exists. PRD requests reach
+Every request first starts and smoke-tests the temporary Pipeline Test process,
+then cleans it up before any persistent deployment. There is no approval for
+TEST or SIT. SIT is a separate Compose service with an independent lifecycle.
+PRD requests reach
 `input` only after successful Build, Test, Package and Security Scan. Approval is limited to the
 exact Jenkins user/group `release-manager`. Jenkins administrators can still
 approve despite `submitter`; users with Job/Cancel can abort a pending input.
@@ -220,29 +223,32 @@ gates: restrict restart/replay permissions and use fresh full PRD builds only.
 Do not rebuild or replace the scanned artifact after approval.
 
 **Even approved PRD requests currently fail deliberately without deploying.**
-Provide and review the real SIT/PRD endpoints, transport, artifact destination,
+Provide and review the real PRD endpoint, transport, artifact destination,
 deployment and health/rollback scripts, environment-specific credential IDs,
 agent isolation and authorization before replacing the explicit errors.
-No server, URL or credential ID is invented here. Approval expires after 15
+There is no production target and no fallback to SIT. Approval expires after 15
 minutes or when the existing overall 60-minute timeout is reached, whichever
 comes first; it does not extend the overall limit. The current top-level agent
-remains allocated during input. No TEST process is started for PRD.
+remains allocated during input. The TEST process is already stopped before approval.
 
 ### Deployment contract and configuration
 
 ```text
 Checkout -> Build -> Test -> Package (one JAR + SHA-256) -> Security Scan
-  TEST -> Deploy (temporary) -> Smoke Test (owned process) -> cleanup
-  SIT  -> Deploy (currently blocked) -> Smoke Test (real SIT endpoint)
-  PRD  -> Approval -> Deploy (currently blocked) -> Smoke Test (real PRD endpoint)
+  -> Pipeline Test: temporary deploy -> readiness -> smoke -> finally cleanup
+  TEST -> done (no persistent deployment)
+  SIT  -> image build -> Compose health/readiness -> container-local smoke -> persist
+  PRD  -> Approval -> explicit failure (production target/method still required)
 ```
 
 `scripts/deploy-test.sh` delegates to the existing temporary deployment.
-`scripts/deploy-sit.sh` and `scripts/deploy-prd.sh` are explicit, nonzero-exit
-placeholders, not remote implementations. Setting a URL or approving PRD does
-not enable them. `scripts/smoke-test.sh` dispatches TEST to the original
-process-aware smoke check and remote environments to `SmokeCheck.java`.
-Remote checks require a non-loopback HTTPS endpoint, no embedded credentials,
+`scripts/deploy-sit.sh` delegates to `scripts/sit-environment.sh deploy`.
+`scripts/deploy-prd.sh` remains a nonzero-exit placeholder; approval cannot enable it.
+`scripts/smoke-test.sh TEST` checks the owned temporary process.
+`scripts/smoke-test.sh SIT` uses Compose exec to run the existing Java HTTP
+checker inside `sit-app`, after Compose health readiness. No agent-to-Windows
+HTTP route or extra published port is required.
+The future PRD remote checker still requires a non-loopback HTTPS endpoint, no embedded credentials,
 query or fragment, a trusted TLS certificate, HTTP 200 and the existing
 `"status":"UP"` response contract. HTTP redirects are not followed. An unreachable
 endpoint or wrong response eventually exits nonzero. An authenticated health
@@ -254,31 +260,158 @@ hostname actually refers to the intended environment.
 | --- | --- | --- |
 | `TARGET_ENV` | Choice parameter | Exactly `TEST`, `SIT` or `PRD`; rejected otherwise before Build. |
 | `SIMULATE_TEST_FAILURE` | Existing parameter | Test-failure demonstration only, not approval. |
-| `TEST_PORT` | Existing parameter | Temporary agent-local port, default 18081; unused by SIT/PRD. |
+| `TEST_PORT` | Fixed Jenkinsfile environment | Exactly 18081, agent-local; script rejects other values. Remove any stale job parameter after Jenkins refreshes its definitions. |
 | `ARTIFACT_PATH` | Fixed Jenkinsfile environment | `target/jenkins-java-maven-demo-1.0.0.jar`; shared by scanner/deploy scripts, not a build parameter. |
 | `BUILD_TAG` | Jenkins built-in | Identifies only this build's temporary TEST process. |
-| `SIT_HEALTH_URL` | Trusted SIT job/folder configuration | Actual reachable SIT HTTPS health URL; unset by default. |
+| `SIT_DOCKER_ENGINE_ID` | Trusted job/folder or agent configuration | Required Docker Desktop engine ID; mismatch or missing value blocks every SIT action before changing resources. This is an identity check, not a credential. |
 | `PRD_HEALTH_URL` | Trusted release job/folder configuration | Actual reachable PRD HTTPS health URL; unset by default. |
-| Remote target / transport / destination | Not yet defined | Approved real server/platform and immutable artifact destination; never derived from user input. |
+| Docker transport | Administrator-managed agent configuration | Authorized socket or TLS-backed connection to Windows Docker Desktop; never an unauthenticated TCP daemon. |
+| PRD target / transport / destination | Not yet defined | Approved real server/platform and immutable artifact destination; never derived from user input. |
 | Application configuration | Target-managed config or Jenkins secret file | Separate environment settings/profile, service account, ports, TLS and secret injection; never baked into the JAR. |
 | Credential IDs | Trusted deployment code/config after review | Separate real TEST/SIT/PRD IDs of the appropriate type; none invented here. |
 
-Before replacing a placeholder, define transfer authentication, verified SSH
+Before replacing the PRD placeholder, define transfer authentication, verified SSH
 host keys or platform TLS trust, process/service/container ownership, release
 activation, artifact checksum verification on the target, rollback, health URL
 and least-privilege network access. The script must deploy `ARTIFACT_PATH`
-without running Maven or replacing/rebuilding the JAR. Different environments
+without running Maven or replacing/rebuilding the JAR. SIT Docker builds copy
+the current tested/scanned JAR, not a separately Maven-built artifact. Different environments
 must use the same artifact format/bytes with external configuration. Each run
-targets one environment; promotion across runs additionally requires a trusted
+tests temporarily and optionally deploys SIT; promotion across runs additionally requires a trusted
 immutable artifact store and digest selection, not another checkout/rebuild.
 The local checksum protects accidental replacement, not a malicious editor of
 the Pipeline or checksum file. Remote delivery verification remains part of the
 future deploy implementation.
 
-Post cleanup calls the original cleanup script only if this run attempted the
-temporary TEST deployment (including partial failure). It never stops a SIT/PRD
+Pipeline Test `finally` always calls process-aware cleanup; post cleanup retries
+if that cleanup did not complete (including partial deployment failure). It never stops a SIT/PRD
 application. Do not add a generic remote shutdown to post cleanup. Deployment
 or smoke failure must remain a failure; rollback must not hide that failure.
+
+### Current topology and SIT operation
+
+Read-only inspection for this change started from clean `main` at
+`ed02c2e2b0329e21317d1c897e934724cd43f245` (`revert code`).
+That revision had no Dockerfile, Compose file or `sit-app`; these are new.
+The application had no explicit `server.port`; SIT now explicitly uses 8080,
+matching Spring Boot's default, as confirmed by the operator.
+
+Observed Docker topology (not inferred from the historical notes below):
+
+- Windows uses context `desktop-linux`, endpoint
+  `npipe:////./pipe/dockerDesktopLinuxEngine`, Docker Desktop's Linux engine.
+- Only `jenkins-backup` was running, from `jenkins/jenkins:lts-jdk21`,
+  publishing 8080/50000. The old `jenkins` container was stopped.
+  No HealthyLife/SIT container or published port 18082 was present.
+- The controller has two built-in executors in NORMAL mode, a `jenkins_home`
+  volume, default bridge networking and no Docker CLI/socket. No node directory
+  was present. The old `agent any` did not guarantee where work would run.
+- The selected design requires an administrator-provisioned Linux agent with
+  label `healthylife-docker`, connected to the same Desktop engine. Build context
+  is sent by Docker CLI from the agent checkout; no host workspace bind mount is
+  used. A remote daemon would publish on that remote host, **not Windows**.
+
+```text
+Windows browser -> 127.0.0.1:18082 (Desktop loopback publish)
+                -> healthylife-sit / sit-app :8080
+Jenkins controller -> healthylife-docker Linux agent -> Desktop Docker API
+                    -> Compose exec -> sit-app localhost:8080/api/health
+                    -> agent localhost:18081 (temporary Pipeline Test only)
+```
+
+`localhost:18081` in the agent means that agent, not Windows.
+For SIT, `http://127.0.0.1:8080/api/health` is used **inside the SIT
+container** by Compose health and exec smoke; it is not the agent's localhost.
+The Windows browser uses `http://localhost:18082/`.
+No direct agent-to-host HTTP URL is assumed, even if networks differ.
+`127.0.0.1:18082:8080` intentionally does not expose SIT to the LAN.
+Keep existing Jenkins ports/networking unchanged in this task.
+
+Before any real run, the administrator must install/provision CLI + Compose,
+authorize daemon access for the labelled agent, and set trusted
+`SIT_DOCKER_ENGINE_ID`. On Windows, obtain the current identity read-only:
+
+```powershell
+docker --context desktop-linux info --format '{{.ID}}'
+```
+
+Compare this value with `docker info --format '{{.ID}}'` on the agent.
+Do not pass a Windows `npipe` context to a Linux agent; configure that agent's
+own authorized socket/TLS transport. A mounted Docker socket grants powerful
+host-level access: use a trusted, isolated agent, not untrusted jobs. Do not
+expose an unauthenticated Docker TCP port. TLS keys, registry credentials and
+future application secrets belong in Jenkins Credentials/secret manager,
+with short-lived bindings and no values in source or logs. There are currently
+no application secrets or registry-login placeholders in the deployment.
+
+For a real Jenkins run **after infrastructure is configured**, choose
+`TARGET_ENV=SIT`. Build, Test, Package, Trivy and temporary Pipeline Test must
+pass first. SIT always builds an image from the checksum-verified current JAR,
+then runs Compose with project `healthylife-sit`, service `sit-app`,
+`--no-build --wait --wait-timeout 180`, and container-local smoke.
+The image uses the new root Dockerfile and build context `.`, restricted by
+`.dockerignore`. Runtime uses non-root Java 21, a read-only filesystem and a
+temporary `/tmp`; no persistent server data or database exists today.
+User data remains in browser localStorage, which is origin-specific:
+18082 does not share settings with 8080 or 18081.
+
+Manual commands below run from a Linux shell at the repository root with the
+same daemon access and trusted `SIT_DOCKER_ENGINE_ID` already configured.
+They are operational instructions, **not commands executed during validation**.
+
+```sh
+# Build the current application and verify it before creating any SIT image.
+sh mvnw -B clean package
+sha256sum target/jenkins-java-maven-demo-1.0.0.jar > target/artifact.sha256
+sh scripts/security-scan.sh
+sha256sum --check target/artifact.sha256
+cmp target/jenkins-java-maven-demo-1.0.0.jar target/security-input/application.jar
+
+# Builds a new image every time, then starts/updates and checks SIT.
+sh scripts/deploy-sit.sh
+sh scripts/sit-environment.sh status
+sh scripts/sit-environment.sh logs
+sh scripts/smoke-test.sh SIT
+
+# Stop only SIT, without deleting its container, images or data.
+sh scripts/sit-environment.sh stop
+# Restart the retained successful image, without rebuilding.
+sh scripts/sit-environment.sh start
+
+# Restore the preceding release, wait for health and smoke; never rebuild.
+sh scripts/sit-environment.sh rollback
+```
+
+Successful releases are retained on that daemon as `healthylife-sit:current`
+and `healthylife-sit:previous`; activation uses immutable image IDs rather than
+relying on a mutable tag. Before updating an existing container, its actual
+image is preserved as `previous`. Failed readiness/smoke automatically attempts
+to restore that image, reports restoration failure explicitly, and still fails
+the build. An initial deployment cannot roll back without a prior image.
+Successful manual rollback swaps the retained versions. No action runs
+`down -v`, deletes volumes or prunes images. There are no application volumes
+today; if persistent data is added, design storage/backups and schema
+compatibility before deploying it. Image rollback alone cannot undo a database
+migration. Keep retained tags/images; manual pruning can remove recovery options.
+Use one trusted deployment job/operator at a time for this shared project:
+`disableConcurrentBuilds()` only serializes the same Jenkins job, not other
+jobs or manual operations.
+
+After an explicitly authorized real deployment, verify from Windows:
+
+```powershell
+$env:SIT_IMAGE='healthylife-sit:current'
+docker --context desktop-linux compose --project-name healthylife-sit --file compose.sit.yaml ps
+Test-NetConnection 127.0.0.1 -Port 18082
+curl.exe --fail-with-body http://127.0.0.1:18082/api/health
+Start-Process 'http://localhost:18082/'
+```
+
+Compose requires an explicit image even for `ps`. Expect a healthy
+`sit-app`, `127.0.0.1:18082->8080/tcp`, and HTTP 200 `{"status":"UP"}`.
+If `localhost` resolves to IPv6 only, try `127.0.0.1`; do not widen the bind
+address as a workaround. This change does not claim that 18082 is currently
+open: no real SIT deployment is performed during validation.
 
 ### Required Jenkins authorization and credentials (outside Jenkinsfile)
 
@@ -316,7 +449,7 @@ or smoke failure must remain a failure; rollback must not hide that failure.
 | Environment | Current need | Configuration when real infrastructure exists |
 | --- | --- | --- |
 | TEST | None: loopback deployment uses no login or secret. | If remote deployment is added, create a TEST-only service identity and TEST-only credential. Never reuse SIT/PRD credentials. |
-| SIT | Not configured; deployment fails explicitly. | Create a separate SIT service identity/credential scoped to the protected SIT job/folder and real target. |
+| SIT | Authorized access from the labelled Linux agent to the agreed Desktop daemon; no application secret today. | Use isolated agent permissions and protected Jenkins credentials for TLS/registry/application secrets when required. |
 | PRD | Not configured; approval cannot enable deployment. | Create a least-privilege PRD service identity/credential in the restricted release folder/job, unavailable to TEST/SIT or untrusted SCM jobs. |
 | SCM | Optional credential for private checkout, managed by the job. | Read-only repository access; not a deployment identity. |
 
@@ -345,13 +478,15 @@ Run on an isolated authorized Jenkins job, not against live production:
 1. Validate with the authenticated Declarative validator below, then run a
    complete SCM build. A Groovy parse or a mocked test is not a substitute for
    Jenkins Declarative validation, installed plugin checks or a real ACL test.
-2. With `TARGET_ENV=TEST` and `SIMULATE_TEST_FAILURE=false`, require all CI gates,
-   selected Deploy and Smoke Test to pass without input. Check JUnit, archived
+2. With `TARGET_ENV=TEST` and `SIMULATE_TEST_FAILURE=false`, require all CI gates
+   and Pipeline Test to pass without input. Check JUnit, archived
    JAR/checksum/scan/logs and cleanup. No SIT/PRD script may run.
-3. With `TARGET_ENV=SIT`, require no input or TEST process and an explicit
-   not-configured failure in Deploy, with Smoke Test skipped. This does **not** prove a SIT
-   deployment works: none exists yet. After real SIT wiring, verify its actual
-   health check, identity and isolation without adding an approval.
+3. With `TARGET_ENV=SIT`, require temporary TEST readiness/smoke/cleanup first,
+   no approval input, and only then persistent SIT deployment, readiness and
+   container-local smoke. With no authorized labelled Docker agent, the run
+   must wait for that agent or fail explicitly on daemon preflight, not use a
+   different daemon. Use mocks for this change; authorize a real acceptance
+   deployment separately after infrastructure setup.
 4. Request PRD as a normal builder: after all gates pass, leave input pending
    and confirm Deploy has not started. Attempt approval via both UI and
    the input HTTP API with an unauthorized non-admin account; neither may
@@ -380,10 +515,10 @@ Run on an isolated authorized Jenkins job, not against live production:
     reject it without a deploy command. Change the JAR after scanning in an
     isolated test: the checksum gate must fail before Deploy. Confirm only one
     Maven package invocation occurs and no deploy script runs Maven.
-11. After real SIT/PRD wiring, verify the target digest matches the archived
-    checksum, health uses that environment's URL, a failed deploy skips Smoke
-    Test, and an unreachable/wrong-status health endpoint fails the build.
-    Verify no post action stops the remote application on failure or abort.
+11. In mocks, verify image build precedes readiness, readiness precedes smoke,
+    a failed SIT activation attempts the previous image and still fails, and
+    no post action stops SIT. Test real SIT acceptance only after authorization.
+    PRD remains blocked until its real target and method are reviewed.
 
 ### Security scanner setup and policy
 
@@ -402,10 +537,10 @@ The checksum list is fetched over HTTPS from the same release; this protects
 against corrupt downloads, not compromise of the upstream release itself.
 No root installation, Docker socket or Jenkins scanner plugin is needed.
 
-Tools and databases persist under `$HOME/.cache/healthylife-trivy`. On the
-inspected `jenkins-backup` agent, HOME is `/var/jenkins_home`, already backed by
-the existing volume. Other agents need their own persistent writable HOME/cache;
-`agent any` does not guarantee one agent. Do not concurrently write the shared
+Tools and databases persist under `$HOME/.cache/healthylife-trivy`. The
+controller's `jenkins_home` volume is not automatically shared with the new
+labelled agent. Provision a persistent writable HOME/cache for that agent.
+A label may match multiple agents, so do not concurrently write the shared
 cache from other jobs. Never delete caches or locks while a scanner is running.
 Trivy downloads a prebuilt vulnerability DB and a separate Java identification
 DB, rather than paging through the NVD API. The first download can still be large
@@ -451,13 +586,13 @@ sh scripts/security-scan.sh
 
 ### Temporary test environment and Docker prerequisites
 
-The working alternative for the inspected agent is a dedicated Java process
+Pipeline Test uses a dedicated Java process
 **inside the Jenkins agent/container**, not production and not a separate
 Smoke Test instance. It binds to `http://127.0.0.1:18081` **inside that agent**.
-Change `TEST_PORT` to another free port between 1024 and 65535 if necessary.
-8080 and 50000 are rejected to protect Jenkins service ports. Host port 8081
-was occupied during inspection, so the default is 18081. Different jobs must
-choose different free ports.
+`TEST_PORT` is fixed at 18081, not a configurable job parameter. Reserve that
+port on the selected agent and isolate other jobs rather than changing it to
+18082 or terminating an unrelated listener. This process is never the SIT
+service and never uses Compose.
 
 The GNU `timeout` supervisor PID is recorded in `target/deployment/app.pid`.
 Its arguments and the JVM carry a unique build marker. Re-deployment stops only
@@ -469,26 +604,28 @@ plus a 10-second forced-stop grace bounds leftovers if Jenkins/agent connectivit
 is lost. Normal cleanup waits up to 15 seconds and explicitly fails if the owned
 process does not stop. No Jenkins container or persistent data is deleted.
 
-The port is **not published on the Windows host**. During a live build, inspect
-it from the host with:
+The port is **not published on the Windows host**. During an authorized live
+build, inspect it from the shell of the agent actually running that build:
 
-```powershell
-docker exec jenkins-backup curl --fail http://127.0.0.1:18081/api/health
+```sh
+curl --fail http://127.0.0.1:18081/api/health
 ```
 
-The application stops responding after post cleanup. Review archived logs and
-Smoke Test output after completion rather than expecting a persistent website.
+The application stops responding after Pipeline Test's `finally` cleanup,
+before persistent SIT deployment; post cleanup is a failure fallback.
+Review archived logs and Pipeline Test output after completion rather than
+expecting a persistent TEST website.
 The health check retries for up to 40 seconds and fails on HTTP errors or wrong
 status. The owned process is checked before and after the health request.
 
-For future Docker deployment, provision a **dedicated Docker-capable Linux
-Jenkins agent** with Docker CLI, approved daemon access, a Java 21 application
-image/build recipe, and networking allowing the agent to reach the published
-test port. Host sockets are not automatically available inside Jenkins.
+For SIT, provision the **dedicated Docker-capable Linux Jenkins agent**
+described above. The Dockerfile and Compose recipe are now in this repository.
+SIT checks execute inside its container, so the agent does not need to reach a
+published host port. Host sockets are not automatically available inside Jenkins.
 Docker socket access is effectively host-root authority and needs approval;
 a remote daemon also requires an explicit reachable host address, not assumed
-`localhost`. Then replace the deployment/cleanup script with container lifecycle
-handling and verify the same deployed container. Installing only the Docker
+`localhost`. Do not replace Pipeline Test cleanup with Compose cleanup.
+Installing only the Docker
 Pipeline plugin is insufficient. Do not remove/recreate the existing `jenkins`
 container, delete `jenkins_home`, grant broad daemon privileges, or run Docker
 prune as part of this demo.
@@ -496,20 +633,61 @@ prune as part of this demo.
 ### Demonstrate a successful and failing build
 
 1. Configure Trivy download/network prerequisites. Run **Build with
-   Parameters**, `SIMULATE_TEST_FAILURE=false`, `TEST_PORT=18081`.
+   Parameters**, `SIMULATE_TEST_FAILURE=false` (fixed `TEST_PORT=18081`).
    Success requires tests **and a real
    security scan** to pass. If findings block the build, review the HTML report
    and remediate them first; do not bypass the gate.
-2. Select `TARGET_ENV=TEST`. Check CI stages, Deploy, Smoke Test, JUnit results,
+2. Select `TARGET_ENV=TEST`. Check CI stages, Pipeline Test, Deploy, JUnit results,
    archived JAR/checksum, HTML/JSON security reports,
    deployment log, and health-check success URL.
 3. Run again with `SIMULATE_TEST_FAILURE=true`. **Test** intentionally fails,
    JUnit shows the assertion failure, and Security Scan, Package, Deploy
-   and Smoke Test are skipped. This demonstration needs no scanner execution
+   and Pipeline Test are skipped. This demonstration needs no scanner execution
    because the failure occurs earlier.
 4. Uncheck the parameter for subsequent normal runs.
 
-### Validation and current limits
+### Environment-separation validation
+
+Run isolated shell/Docker lifecycle mocks on Windows with Git for Windows Bash
+and Node.js (no dependency installation required):
+
+```powershell
+node --test scripts\tests\environments.test.cjs
+$env:SIT_IMAGE='healthylife-sit:syntax-only'
+docker compose --project-name healthylife-sit --file compose.sit.yaml config --quiet
+git diff --check
+```
+
+`TEST_SHELL` can select an existing POSIX shell; Linux defaults to `/bin/sh`.
+The mock suite never invokes a real Docker daemon, starts an application or
+deploys a service. It covers build/checksum gates, wait-before-smoke,
+daemon identity rejection, failed readiness/smoke recovery, failed restoration,
+first-deploy failure, manual rollback, lifecycle/resource isolation, PID safety,
+idempotent cleanup and blocked PRD. Compose `config` only parses configuration.
+The Groovy harness in `scripts/tests/pipeline-mocks.groovy` parses the current
+Jenkinsfile and exercises mocked commands/approval/cleanup. It requires an
+existing Groovy 2.4+ runtime and the current Jenkinsfile in Base64 system
+property `healthylife.pipeline`; no credentials are needed.
+With an existing Groovy CLI, the Pipeline harness can also be run locally:
+
+```powershell
+$pipeline = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD\Jenkinsfile"))
+groovy "-Dhealthylife.pipeline=$pipeline" .\scripts\tests\pipeline-mocks.groovy
+```
+
+Current checks passed: 28 Node/shell contract and lifecycle cases, 31 Groovy
+Pipeline cases, shell syntax, Compose config and `git diff --check`.
+The unauthenticated Declarative validator returned HTTP 403.
+Groovy parsing and mock execution are **not** Jenkins CPS/Declarative validation.
+Use the authenticated HTTP validator documented below before a real build.
+No actual SIT build/deploy, readiness HTTP request, rollback, Maven test rerun,
+Trivy scan or browser reachability is claimed by mock validation.
+
+### Historical validation (before environment separation)
+
+The notes below belong to earlier revisions and are retained only as history.
+Their container names, ports, placeholders and results do not describe the
+current code or establish the current Docker topology.
 
 Multi-environment change validation on 2026-10-29:
 
@@ -615,9 +793,9 @@ From this existing repository, review only intended changes, commit and push:
 ```powershell
 git status --short
 git diff --check
-git diff -- Jenkinsfile pom.xml scripts/security-scan.sh README.md
-git add Jenkinsfile pom.xml scripts/security-scan.sh README.md
-git commit -m "Replace NVD dependency scan with pinned Trivy" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+git diff -- Jenkinsfile Dockerfile compose.sit.yaml .dockerignore scripts README.md
+git add Jenkinsfile Dockerfile compose.sit.yaml .dockerignore scripts/deploy-sit.sh scripts/sit-environment.sh scripts/smoke-test.sh scripts/test-environment.sh scripts/tests README.md
+git commit -m "Separate temporary Pipeline Test from persistent SIT" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 git push -u origin main
 ```
 
@@ -637,5 +815,5 @@ owner; never commit credentials or generated reports.
 - **The browser reports a connection error:** make sure the application is running and reload the page at `http://localhost:8080/`.
 - **Local settings cannot be saved:** allow site storage in the browser; the app will show a message and continue to use entered values for the open page.
 - **Security Scan fails:** inspect the stage log and available Trivy reports. Check release/OCI registry network access and persistent cache permissions; remediate HIGH/CRITICAL findings rather than disabling the gate. NVD credentials are no longer used.
-- **Test deployment fails:** inspect `target/deployment/app.log`, choose a free `TEST_PORT`, verify Linux/GNU `timeout`/Java 21 prerequisites, and leave unrelated processes alone.
+- **Test deployment fails:** inspect `target/deployment/app.log`, ensure reserved port 18081 is available on the selected agent, verify Linux/GNU `timeout`/Java 21 prerequisites, and leave unrelated processes alone.
 - **Smoke test fails in Jenkins:** inspect the deployment log and health-check URL. Cleanup targets only the current build's deployment; an agent-local port is not a Windows-host URL.

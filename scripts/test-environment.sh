@@ -58,17 +58,16 @@ case "$action" in
         case "$TEST_PORT" in
             ''|*[!0-9]*) fail "TEST_PORT must be a decimal port number." ;;
         esac
-        [ "$TEST_PORT" -ge 1024 ] && [ "$TEST_PORT" -le 65535 ] ||
-            fail "TEST_PORT must be between 1024 and 65535."
-        [ "$TEST_PORT" -ne 8080 ] && [ "$TEST_PORT" -ne 50000 ] ||
-            fail "Refusing to use a Jenkins service port."
+        [ "$TEST_PORT" = 18081 ] || fail "Pipeline Test is reserved for TEST_PORT=18081."
         [ -f "$jar" ] || fail "Packaged JAR not found: $jar"
         cleanup
         mkdir -p "$state"
         printf '%s\n' "$TEST_PORT" > "$state/port"
         echo "Deploying packaged JAR as an isolated, temporary process on this agent."
-        echo "Docker is not required: the inspected Jenkins container has no Docker CLI/socket."
+        echo "Pipeline Test uses no Docker resources and cannot stop SIT."
         echo "Test URL: http://127.0.0.1:$TEST_PORT (agent-local, not host-published)."
+        trap 'status=$?; trap - EXIT; if [ "$status" -ne 0 ]; then cleanup; fi; exit "$status"' EXIT
+        trap 'exit 1' HUP INT TERM
         # A distinct Jenkins cookie survives sh-step completion; timeout bounds orphan lifetime.
         BUILD_ID="$BUILD_TAG-healthylife" JENKINS_NODE_COOKIE="$BUILD_TAG-healthylife" \
             nohup timeout --signal=TERM --kill-after=10s 10m \
@@ -77,7 +76,6 @@ case "$action" in
             > "$log_file" 2>&1 < /dev/null &
         pid=$!
         printf '%s\n' "$pid" > "$pid_file"
-        trap 'cleanup; exit 1' HUP INT TERM
         attempts=0
         until grep -F 'Started HealthyLifeApplication' "$log_file" > /dev/null; do
             if ! owns_process; then
@@ -93,7 +91,9 @@ case "$action" in
             sleep 1
         done
         owns_process || fail "Deployment process exited during startup."
-        echo "Packaged application started successfully; Smoke Test will verify this deployment."
+        java scripts/SmokeCheck.java "http://127.0.0.1:$TEST_PORT/api/health"
+        owns_process || fail "Deployment process exited during readiness."
+        echo "Readiness passed; Smoke Test will independently verify this deployment."
         ;;
     smoke)
         read_pid
