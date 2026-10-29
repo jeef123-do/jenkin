@@ -19,6 +19,7 @@
 
   <properties>
     <java.version>21</java.version>
+    <dependency-check.dataDirectory>${settings.localRepository}/org/owasp/dependency-check-data/11.0</dependency-check.dataDirectory>
   </properties>
 
   <dependencies>
@@ -56,6 +57,8 @@
             <artifactId>dependency-check-maven</artifactId>
             <version>13.0.0</version>
             <configuration>
+              <dataDirectory>${dependency-check.dataDirectory}</dataDirectory>
+              <nvdValidForHours>4</nvdValidForHours>
               <failBuildOnCVSS>7.0</failBuildOnCVSS>
               <failOnError>true</failOnError>
               <nvdApiKeyEnvironmentVariable>NVD_API_KEY</nvdApiKeyEnvironmentVariable>

@@ -200,7 +200,8 @@ dependent stages after a failure.
    `nvdApiKeyEnvironmentVariable`. Never echo it, enable Maven debug logging,
    pass it on the command line, or commit it.
 
-There was no Dependency-Check installation/cache in the inspected Jenkins agent.
+At the initial inspection there was no Dependency-Check installation/cache in
+the Jenkins agent; subsequent runs have created a persistent database.
 The profile pins the scanner and Maven must successfully resolve it. Missing or
 empty credentials, download/feed errors, rate limits, invalid keys, missing data,
 and timeouts fail the stage rather than producing a green build. The initial NVD
@@ -234,7 +235,7 @@ The inspected active container is now `jenkins-backup`, mounting the existing
 `/var/jenkins_home/.m2/repository/org/owasp/dependency-check-data/`.
 The `11.0` subdirectory is the scanner's data-schema version, not the pinned
 plugin version (13.0.0). Both update-only and normal scan use the same Maven
-profile/default cache; `mvn clean` removes `target`, not this cache.
+profile/cache; `mvn clean` removes `target`, not this cache.
 The database was approximately 290 MB during inspection, but file existence
 does not prove a complete usable update. An interrupted initial update can
 require downloading records again; it is not guaranteed to resume at the last
@@ -248,6 +249,38 @@ investigate the key, shared API usage, proxy and NVD availability instead of
 repeatedly restarting or reducing the API delay. Serialize other jobs that share
 this database or key. Subsequent builds need the same persistent cache/agent;
 `agent any` does not ensure this in a multi-agent Jenkins installation.
+
+#### Explicit persistent cache configuration
+
+The security profile explicitly sets `dataDirectory` through the Maven property
+`dependency-check.dataDirectory`. Its default is
+`${settings.localRepository}/org/owasp/dependency-check-data/11.0`, matching the
+existing Dependency-Check 13.0.0 cache so no database migration or fresh download
+is introduced by this change. On the inspected Jenkins agent this is already
+inside the persistent `jenkins_home` volume; no new Docker bind mount is needed.
+The schema suffix must be reviewed when upgrading the scanner.
+
+`nvdValidForHours` is explicitly **4**, preserving the scanner's normal NVD
+freshness window. A successful recent update can be reused instead of querying
+NVD on every run; older data triggers an update. This is not offline mode,
+does not disable update errors, and does not make an incomplete initial download
+complete. Preparation and normal scans use the same settings. Other supporting
+feeds may still make network requests within the NVD freshness window.
+
+For another approved persistent location, pass the same property to both
+`dependency-check:update-only` and `dependency-check:check`, for example
+`"-Ddependency-check.dataDirectory=/approved/persistent/owasp"`. Changing this
+path to an empty directory requires initialization again. Do not copy/move live
+database files; wait until all scanner processes using them have stopped.
+The directory must be writable by the agent and scans sharing it must be
+serialized across jobs.
+
+Unlike the GitLab example, this Jenkins setup does not hardcode a key, pass it
+through `-DnvdApiKey=...`, use `/tmp` as an unmounted cache, or allow scan failure.
+HTML/JSON reports and environment-variable credential binding already exist.
+SonarQube integration is not needed to retain Jenkins security reports and is not
+added. Persistent caching helps subsequent updates, not the throughput of the
+first full NVD download.
 
 The explicit **7.0** threshold blocks High/Critical findings; Low/Medium findings
 remain visible in reports. Test dependencies are included. No skip flag,
