@@ -55,7 +55,7 @@ HealthyLife is a friendly, responsive wellness dashboard with a BMI calculator a
 
 - Java 21 JDK
 - For local builds, Maven is optional; the Maven Wrapper downloads the pinned Maven distribution.
-- For Jenkins, provision a Linux agent labelled `healthylife-docker` with Java 21, `/proc`, POSIX `sh`, `nohup`, GNU `timeout`, `grep`, `tr`, `git`, `sha256sum` and the security-scan tools. SIT/local PRD additionally need Docker CLI, Compose v2+ with `up --wait`, and authorized access to the **same Docker Desktop daemon as Windows**. Network access to Maven Central, vulnerability feeds and the base-image registry is required. Maven is downloaded by the wrapper.
+- For Jenkins, provision a Linux agent labelled `healthylife-docker` with Java 21, `/proc`, POSIX `sh`, `nohup`, GNU `timeout`, `grep`, `tr`, `git`, `sha256sum` and the security-scan tools. SIT/local PRD additionally need Docker CLI, Compose v2+ and authorized access to the **same Docker Desktop daemon as Windows**. Network access to Maven Central, vulnerability feeds and the base-image registry is required. Maven is downloaded by the wrapper.
 
 The Jenkins pipeline uses `agent { label 'healthylife-docker' }`, not `agent any`. This agent is an infrastructure prerequisite, not created by this repository. The checked-in Maven Wrapper downloads Maven 3.9.9 when needed.
 
@@ -350,8 +350,12 @@ no application secrets or registry-login placeholders in the deployment.
 For a real Jenkins run **after infrastructure is configured**, choose
 `TARGET_ENV=SIT`. Build, Test, Package, Trivy and temporary Pipeline Test must
 pass first. SIT always builds an image from the checksum-verified current JAR,
-then runs Compose with project `healthylife-sit`, service `sit-app`,
-`--no-build --wait --wait-timeout 180`, and container-local smoke.
+then reconciles through Compose `create --no-build` with project
+`healthylife-sit`, service `sit-app`. It selects the single container ID via
+Compose, starts it with Docker CLI, waits for Docker health, and runs
+container-local smoke. Creation/start/health share a GNU timeout of 240 seconds
+(plus at most a 5-second forced-termination grace). Readiness allows up to 180
+one-second polling intervals within that overall limit and reports each state.
 The image uses the new root Dockerfile and build context `.`, restricted by
 `.dockerignore`. Runtime uses non-root Java 21, a read-only filesystem and a
 temporary `/tmp`; no persistent server data or database exists today.
@@ -388,9 +392,14 @@ sh scripts/sit-environment.sh rollback
 Successful releases are retained on that daemon as `healthylife-sit:current`
 and `healthylife-sit:previous`; activation uses immutable image IDs rather than
 relying on a mutable tag. Before updating an existing container, its actual
-image is preserved as `previous`. Failed readiness/smoke automatically attempts
+image is preserved as `previous`. Definitive readiness/smoke failure automatically attempts
 to restore that image, reports restoration failure explicitly, and still fails
-the build. An initial deployment cannot roll back without a prior image.
+the build. Recovery uses the same bounded create/start/health flow.
+On activation timeout or interruption/abort, daemon state is uncertain:
+the scripts fail without issuing automatic retry/rollback that could race an
+in-flight daemon request. Inspect the selected container and confirm the old
+request is finished before recovery. Killing a CLI does not cancel every
+operation already accepted by Docker. An initial deployment cannot roll back without a prior image.
 Successful manual rollback swaps the retained versions. No action runs
 `down -v`, deletes volumes or prunes images. There are no application volumes
 today; if persistent data is added, design storage/backups and schema
@@ -469,8 +478,10 @@ Local PRD retains `healthylife-prd:current` and `healthylife-prd:previous`,
 independently of SIT images. It always builds the current packaged/scanned JAR
 before deploy, waits for Compose health, then smokes through exec inside
 `prd-app` at `http://127.0.0.1:8080/api/health`. Agent localhost is not Windows;
-no separate agent-to-Windows HTTP route is assumed. Failed activation attempts
-restoration of PRD's preceding image and still fails the request. Stop/rollback
+no separate agent-to-Windows HTTP route is assumed. Definitive activation failure attempts
+restoration of PRD's preceding image and still fails the request. Activation
+timeout/abort requires operator investigation instead of overlapping recovery,
+as described for SIT. Stop/rollback
 do not remove volumes or browser data. The same storage/schema and
 single-operator limitations described for SIT apply.
 
@@ -757,13 +768,23 @@ $pipeline = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD\Jenkinsfile"
 groovy "-Dhealthylife.pipeline=$pipeline" .\scripts\tests\pipeline-mocks.groovy
 ```
 
-Current local PRD checks: 51 Node/shell contract and lifecycle cases, 32 Groovy
+Current activation-fix checks: 62 Node/shell contract and lifecycle cases, 32 Groovy
 Pipeline cases, shell syntax, Compose config and `git diff --check`.
 The unauthenticated Declarative validator returned HTTP 403.
 Groovy parsing and mock execution are **not** Jenkins CPS/Declarative validation.
 Use the authenticated HTTP validator documented below before a real build.
 No actual SIT/PRD build/deploy, readiness HTTP request, rollback, Maven test rerun,
 Trivy scan or browser reachability is claimed by mock validation.
+
+Repeated `Starting` hang investigation: Compose v5.6.1 `up` left PRD in
+`Created` with PID 0 and no network endpoint on two runs. A separately
+authorized, 30-second-bounded `docker start` through the same Jenkins agent
+succeeded, followed by container-local smoke, Docker `healthy` and Windows
+HTTP 200 on port 18083; SIT remained healthy. This isolates the reproducible
+symptom to the Compose activation path, but does not prove its internal cause.
+The deployment now separates Compose reconciliation from Docker CLI start.
+The new end-to-end Jenkins create/start path still needs an authorized real
+build after commit/push; mock success is not proof of that acceptance run.
 
 ### Historical validation (before environment separation)
 

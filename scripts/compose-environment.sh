@@ -34,6 +34,7 @@ case "$action" in
     *) fail "Unknown action: $action" ;;
 esac
 command -v docker > /dev/null || fail "Docker CLI is missing on this agent."
+command -v timeout > /dev/null || fail "GNU timeout is required to bound container activation."
 docker compose version > /dev/null || fail "Docker Compose v2+ is required."
 engine_id=$(docker info --format '{{.ID}}') || fail "Cannot access the Docker daemon. Configure agent permissions/transport outside this repository."
 [ "$engine_id" = "$engine_expected" ] || fail "Wrong Docker daemon; refusing to operate on $environment."
@@ -68,14 +69,55 @@ active_image() {
 
 old_image=
 updating=false
+activation_uncertain=false
+
+activate() {
+    activation_status=0
+    echo "$environment activation: create/reconcile, Docker start, then health (240-second total limit)."
+    timeout --signal=TERM --kill-after=5s 240s sh -eu -c '
+        project=$1
+        file=$2
+        service=$3
+        docker compose --project-name "$project" --file "$file" create --no-build "$service"
+        container=$(docker compose --project-name "$project" --file "$file" ps --all --quiet "$service")
+        [ -n "$container" ] || { echo "No container selected for $project/$service." >&2; exit 1; }
+        case "$container" in
+            *[!a-f0-9]*) echo "Expected exactly one Docker container ID; refusing to start." >&2; exit 1 ;;
+        esac
+        echo "Starting $project/$service container $container with Docker CLI."
+        docker start "$container"
+        attempts=0
+        while [ "$attempts" -lt 180 ]; do
+            state=$(docker inspect --format "{{.State.Status}} {{.State.Health.Status}}" "$container")
+            echo "$project/$service: $state"
+            case "$state" in
+                "running healthy") exit 0 ;;
+                "running starting"|"created starting") ;;
+                *) echo "Container failed readiness: $state" >&2; exit 1 ;;
+            esac
+            attempts=$((attempts + 1))
+            sleep 1
+        done
+        echo "Container did not become healthy within 180 readiness attempts." >&2
+        exit 1
+    ' sh "$project" "$file" "$service" || activation_status=$?
+    if [ "$activation_status" -eq 124 ] || [ "$activation_status" -eq 137 ]; then
+        activation_uncertain=true
+        echo "$environment activation timed out. A daemon request may still be in flight; no automatic retry or rollback will be issued. Inspect container state before recovery." >&2
+    fi
+    return "$activation_status"
+}
+
 restore_on_exit() {
     status=$?
     trap - EXIT HUP INT TERM
-    if [ "$updating" = true ]; then
+    if [ "$updating" = true ] && [ "$activation_uncertain" = true ]; then
+        echo "$environment activation is uncertain after timeout/interruption; no automatic retry or rollback. Inspect container state; retained images and volumes were not deleted." >&2
+    elif [ "$updating" = true ]; then
         if [ -n "$old_image" ]; then
             echo "$environment update failed; restoring the preceding container image." >&2
             select_image "$old_image"
-            if compose up --detach --no-build --wait --wait-timeout 180 "$service" && smoke; then
+            if activate && smoke; then
                 echo "$environment restored; the requested update still failed." >&2
             else
                 echo "$environment restoration failed; operator intervention is required. No volumes were removed." >&2
@@ -87,7 +129,7 @@ restore_on_exit() {
     exit "$status"
 }
 trap restore_on_exit EXIT
-trap 'exit 1' HUP INT TERM
+trap 'activation_uncertain=true; exit 1' HUP INT TERM
 
 compose config --quiet
 case "$action" in
@@ -110,7 +152,7 @@ case "$action" in
         fi
         select_image "$candidate"
         updating=true
-        compose up --detach --no-build --wait --wait-timeout 180 "$service"
+        activate
         smoke
         docker image tag "$candidate" "$current"
         updating=false
@@ -123,7 +165,7 @@ case "$action" in
         [ -n "$old_image" ] || fail "No current $environment container; investigate before rollback."
         select_image "$candidate"
         updating=true
-        compose up --detach --no-build --wait --wait-timeout 180 "$service"
+        activate
         smoke
         docker image tag "$old_image" "$previous"
         docker image tag "$candidate" "$current"
@@ -134,7 +176,7 @@ case "$action" in
         candidate=$(docker image inspect --format '{{.Id}}' "$current") ||
             fail "No built $environment release. Use deploy after building/testing/scanning the JAR."
         select_image "$candidate"
-        compose up --detach --no-build --wait --wait-timeout 180 "$service"
+        activate
         smoke
         ;;
     smoke) smoke ;;
