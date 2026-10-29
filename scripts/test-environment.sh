@@ -4,7 +4,7 @@ set -eu
 state=target/deployment
 pid_file="$state/app.pid"
 log_file="$state/app.log"
-jar=target/jenkins-java-maven-demo-1.0.0.jar
+jar=${ARTIFACT_PATH:-target/jenkins-java-maven-demo-1.0.0.jar}
 action=${1:?Specify deploy, smoke or cleanup}
 : "${BUILD_TAG:?BUILD_TAG must identify this build}"
 marker="-Dhealthylife.deployment=$BUILD_TAG"

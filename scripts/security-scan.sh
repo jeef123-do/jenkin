@@ -2,7 +2,7 @@
 set -eu
 
 version=0.76.1
-jar=target/jenkins-java-maven-demo-1.0.0.jar
+jar=${ARTIFACT_PATH:-target/jenkins-java-maven-demo-1.0.0.jar}
 reports=target/security
 : "${HOME:?A persistent writable HOME is required}"
 cache="$HOME/.cache/healthylife-trivy"

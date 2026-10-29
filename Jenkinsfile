@@ -1,4 +1,5 @@
 def productionApproved = false
+def temporaryTestStarted = false
 
 pipeline {
     agent any
@@ -11,17 +12,25 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '5'))
     }
     parameters {
-        choice(name: 'DEPLOY_ENV', choices: ['TEST', 'SIT', 'PRD'],
-               description: 'Deployment request only, not authorization. SIT/PRD are blocked until configured.')
+        choice(name: 'TARGET_ENV', choices: ['TEST', 'SIT', 'PRD'],
+               description: 'Deployment request, not authorization. TEST is temporary on this agent; SIT/PRD require infrastructure wiring.')
         booleanParam(name: 'SIMULATE_TEST_FAILURE', defaultValue: false,
                      description: 'Tick only to demonstrate the failing Test stage.')
         string(name: 'TEST_PORT', defaultValue: '18081',
                description: 'Temporary test application port on the Linux agent (not Jenkins port 8080).')
     }
+    environment {
+        ARTIFACT_PATH = 'target/jenkins-java-maven-demo-1.0.0.jar'
+    }
     stages {
         stage('Checkout') {
             steps {
                 checkout scm
+                script {
+                    if (!(params.TARGET_ENV in ['TEST', 'SIT', 'PRD'])) {
+                        error('TARGET_ENV must be TEST, SIT or PRD.')
+                    }
+                }
             }
         }
         stage('Build') {
@@ -50,6 +59,7 @@ pipeline {
         stage('Package') {
             steps {
                 sh 'sh mvnw -B package -DskipTests'
+                sh 'sha256sum "$ARTIFACT_PATH" > target/artifact.sha256'
             }
         }
         stage('Security Scan') {
@@ -58,30 +68,18 @@ pipeline {
             }
             steps {
                 echo 'Trivy scans the packaged JAR before deployment. HIGH/CRITICAL findings and scanner/download/report errors fail the Pipeline. No NVD API key is required.'
-                sh 'sh scripts/security-scan.sh'
-            }
-        }
-        stage('Deploy to Test') {
-            steps {
-                sh 'sh scripts/test-environment.sh deploy'
-            }
-        }
-        stage('Smoke Test') {
-            steps {
-                sh 'sh scripts/test-environment.sh smoke'
-            }
-        }
-        stage('Deploy to SIT') {
-            when {
-                expression { params.DEPLOY_ENV == 'SIT' }
-            }
-            steps {
-                error('SIT deployment is not configured. Define the real target, deployment/health-check script and SIT-only Jenkins credentials before enabling it.')
+                sh '''
+                    set -eu
+                    sha256sum --check target/artifact.sha256
+                    sh scripts/security-scan.sh
+                    sha256sum --check target/artifact.sha256
+                    cmp "$ARTIFACT_PATH" target/security-input/application.jar
+                '''
             }
         }
         stage('Production Approval') {
             when {
-                expression { params.DEPLOY_ENV == 'PRD' }
+                expression { params.TARGET_ENV == 'PRD' }
             }
             options {
                 timeout(time: 15, unit: 'MINUTES')
@@ -89,7 +87,7 @@ pipeline {
             steps {
                 script {
                     if (currentBuild.currentResult != 'SUCCESS') {
-                        error('Production approval requires successful Build, Test, Security Scan and TEST smoke test.')
+                        error('Production approval requires successful Build, Test, Package and Security Scan.')
                     }
                     input message: "Approve PRD request for ${env.JOB_NAME} #${env.BUILD_NUMBER}? Infrastructure is not configured; approval will not deploy.",
                           ok: 'Approve PRD request',
@@ -98,16 +96,49 @@ pipeline {
                 }
             }
         }
-        stage('Deploy to PRD') {
-            when {
-                expression { params.DEPLOY_ENV == 'PRD' }
-            }
+        stage('Deploy') {
             steps {
                 script {
-                    if (!productionApproved || currentBuild.currentResult != 'SUCCESS') {
-                        error('PRD requires approval in this run after successful prerequisite stages. Restarting directly at Deploy to PRD is not allowed.')
+                    if (currentBuild.currentResult != 'SUCCESS') {
+                        error('Deployment requires successful prerequisite stages.')
                     }
-                    error('PRD deployment is not configured. Approval alone does not enable deployment. Define the real target, protected deployment/health-check script, PRD-only Jenkins credentials and Jenkins authorization before enabling it.')
+                    if (params.TARGET_ENV == 'PRD' && !productionApproved) {
+                        error('PRD requires approval in this run. Restarting directly at Deploy is not allowed.')
+                    }
+                    sh 'sha256sum --check target/artifact.sha256'
+                    switch (params.TARGET_ENV) {
+                        case 'TEST':
+                            temporaryTestStarted = true
+                            sh 'sh scripts/deploy-test.sh'
+                            break
+                        case 'SIT':
+                            sh 'sh scripts/deploy-sit.sh'
+                            break
+                        case 'PRD':
+                            sh 'sh scripts/deploy-prd.sh'
+                            break
+                        default:
+                            error('TARGET_ENV must be TEST, SIT or PRD.')
+                    }
+                }
+            }
+        }
+        stage('Smoke Test') {
+            steps {
+                script {
+                    switch (params.TARGET_ENV) {
+                        case 'TEST':
+                            sh 'sh scripts/smoke-test.sh TEST'
+                            break
+                        case 'SIT':
+                            sh 'sh scripts/smoke-test.sh SIT'
+                            break
+                        case 'PRD':
+                            sh 'sh scripts/smoke-test.sh PRD'
+                            break
+                        default:
+                            error('TARGET_ENV must be TEST, SIT or PRD.')
+                    }
                 }
             }
         }
@@ -115,20 +146,20 @@ pipeline {
     post {
         always {
             junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
-            archiveArtifacts artifacts: 'target/*.jar,target/security/*,target/deployment/*.log',
+            archiveArtifacts artifacts: 'target/*.jar,target/artifact.sha256,target/security/*,target/deployment/*.log',
                              allowEmptyArchive: true,
                              fingerprint: true
             echo 'HealthyLife CI/CD pipeline execution finished. TEST deployment is temporary; SIT/PRD deployment is not configured.'
         }
         success {
-            echo 'HealthyLife CI/CD passed: tests, Trivy security gate, test deployment and deployed-service health check.'
+            echo 'HealthyLife CI/CD passed: tests, Trivy security gate, selected deployment and deployed-service health check.'
         }
         failure {
             echo 'HealthyLife CI/CD failed. Dependent stages are skipped; review stage logs, test results and available security reports.'
         }
         cleanup {
             script {
-                if (fileExists('scripts/test-environment.sh')) {
+                if (temporaryTestStarted && fileExists('scripts/test-environment.sh')) {
                     sh 'sh scripts/test-environment.sh cleanup'
                 }
             }
