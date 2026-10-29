@@ -53,7 +53,10 @@ HealthyLife is a friendly, responsive wellness dashboard with a BMI calculator a
 - For local builds, Maven is optional; the Maven Wrapper downloads the pinned Maven distribution.
 - For Jenkins, use a Linux agent with Java 21, `/proc`, POSIX `sh`, `nohup`, GNU `timeout`, `grep`, and `tr`. Network access to Maven Central and vulnerability feeds is required. Maven and Docker do not need to be installed on that agent.
 
-The Jenkins pipeline uses `agent any`; Java 21 must be available on the selected agent. The checked-in Maven Wrapper downloads Maven 3.9.9 when needed.
+The current Jenkins pipeline uses `healthylife-linux` for CI/Pipeline Test and
+`healthylife-windows-sit` for persistent SIT. Configure the node labels first.
+The Maven Wrapper downloads Maven 3.9.9 when needed. See
+[ENVIRONMENTS.md](ENVIRONMENTS.md) for the current topology and setup.
 
 ## Run locally in VS Code
 
@@ -161,12 +164,24 @@ The optional Male/Female selection is saved in `localStorage` and is not sent to
 
 ## Jenkins: Pipeline script from SCM
 
+**Current workflow:** Every request runs temporary Pipeline Test at fixed port
+18081 and cleans its owned process before proceeding. TEST then ends; SIT uses
+the dedicated Windows agent and `compose.sit.yaml` to persist at Windows-local
+port 18082; PRD fails before approval because no Production target is supplied.
+Dockerfile and `scripts/sit-service.ps1` are new runtime/lifecycle files for SIT.
+They never manage Production. No deployment has been performed by this change.
+See [ENVIRONMENTS.md](ENVIRONMENTS.md) for authoritative current setup,
+credentials, URLs, start/stop/log/rollback and acceptance tests.
+
 1. Push the updated project to GitHub with `pom.xml` and `Jenkinsfile` at its root.
 2. Ensure the agent meets the Linux prerequisites above. The inspected `jenkins` container has Java 21, Maven 3.9.9 and GNU `timeout`, but **neither Docker CLI nor a Docker socket**. Host Docker access does not imply Jenkins Docker access. No Docker Pipeline plugin or `agent { docker { ... } }` syntax is used.
 3. Allow the Trivy release/database downloads described below. Jenkins needs Declarative Pipeline, Pipeline: Input Step, Git, JUnit and Timestamper plugins. Future credential-backed deployments also need Credentials and Credentials Binding. No scanner Jenkins plugin, Docker daemon or NVD credential is required.
 4. Create a **Pipeline** job or edit the existing one. Choose **Pipeline script from SCM**, select **Git**, and use `https://github.com/jeef123-do/jenkin.git` with repository credentials if needed.
 5. Set **Branch Specifier** to `*/main` and **Script Path** to `Jenkinsfile`, then save.
-6. Select **Build Now** once to load updated parameter definitions, then use **Build with Parameters**. The first run may fail closed while parameters refresh. Select `TARGET_ENV`; the old `DEPLOY_ENV` parameter is no longer used and must not be used by API callers.
+6. Configure both node labels as described in ENVIRONMENTS.md. Refresh parameter
+   definitions, then use **Build with Parameters**. Select TARGET_ENV; TEST_PORT
+   is fixed, not a parameter. Do not start a SIT deployment until separately
+   authorized. The old DEPLOY_ENV parameter is not used.
 
 ### Stages and reports
 
@@ -177,9 +192,11 @@ The optional Male/Female selection is saved in `localStorage` and is not sent to
 | Test | Run the suite, preserving `SIMULATE_TEST_FAILURE`. |
 | Package | Package once and record `target/artifact.sha256` for the tested JAR. |
 | Security Scan | Run pinned Trivy **0.76.1** against the packaged JAR. Fail on HIGH/CRITICAL findings or scanner errors; verify the checksum before/after scanning and compare the scan input to the original JAR. |
-| Production Approval | PRD only, after all gates succeed. `input` restricts approval to `release-manager`, with a 15-minute timeout within the existing 60-minute overall timeout. |
-| Deploy | Check successful gates, PRD approval when needed, and JAR checksum; dispatch only the selected environment script. TEST is temporary; SIT/PRD scripts explicitly fail until implemented. |
-| Smoke Test | Dispatch only the selected environment check after successful deployment. TEST checks its owned local process; SIT/PRD use their actual configured HTTPS health endpoints. |
+| Deploy to Test / Smoke Test | Every request runs owned temporary TEST on Linux port 18081. Group post archives and cleans TEST even after failure. |
+| Prepare SIT Artifact | Verify checksum and stash the same JAR/runtime files only for SIT. |
+| Deploy to SIT / SIT Smoke Test | Dedicated Windows SIT agent uses local Docker Desktop, isolated project/service/profile/state and loopback port 18082; no approval. |
+| Production Configuration | PRD fails before input because no target is supplied; no fallback to SIT/localhost. |
+| Production Approval / Deploy to Production | Disabled behind the configuration failure. Future input uses submitter release-manager; deploy still explicitly fails until separately reviewed and implemented. |
 
 Post actions retain JUnit results and archive `target/*.jar`, available
 `target/security/*` (HTML, JSON, text and package inventory), `target/artifact.sha256`
@@ -201,48 +218,49 @@ deployment, deploy credentials or SIT implementation. Jenkins job ACLs,
 credential stores and infrastructure permissions are not defined in this
 repository and cannot be verified from this file.
 
-Only the selected environment is deployed and smoke-tested. SIT/PRD never start
-the temporary TEST process. There is no approval for TEST or SIT. SIT requests
-fail explicitly in Deploy because no SIT target exists. PRD requests reach
-`input` only after successful Build, Test, Package and Security Scan. Approval is limited to the
+Every request runs and cleans Pipeline Test first. TEST ends there; SIT deploys
+the persistent Windows-local integration instance without approval. PRD fails
+at Production Configuration before any approval or target contact. The retained
+future approval template is limited to the
 exact Jenkins user/group `release-manager`. Jenkins administrators can still
 approve despite `submitter`; users with Job/Cancel can abort a pending input.
 An abort or timeout propagates normally, skips PRD deployment and still runs post
 actions/cleanup. It is not caught or converted into approval.
 
-The internal Groovy approval flag is set only after `input` returns successfully,
-not from a parameter. Deploy for PRD also checks that flag and a successful build
-result. `disableRestartFromStage()` prevents restarting at Approval or Deploy
-to bypass earlier gates; a fresh run also starts with a false approval flag.
+The internal CI flag and successful build result gate SIT after TEST cleanup.
+No parameter is treated as approval. Production has two explicit failure
+barriers. `disableRestartFromStage()` prevents restarting past earlier gates.
 This is defense in depth, not protection against someone who can edit/replay
 the Pipeline or control Jenkins. Do not use stage restart to skip required
 gates: restrict restart/replay permissions and use fresh full PRD builds only.
 Do not rebuild or replace the scanned artifact after approval.
 
-**Even approved PRD requests currently fail deliberately without deploying.**
-Provide and review the real SIT/PRD endpoints, transport, artifact destination,
+**PRD currently fails before requesting approval or deploying.**
+Provide and review the real Production endpoints, transport, artifact destination,
 deployment and health/rollback scripts, environment-specific credential IDs,
 agent isolation and authorization before replacing the explicit errors.
 No server, URL or credential ID is invented here. Approval expires after 15
 minutes or when the existing overall 60-minute timeout is reached, whichever
-comes first; it does not extend the overall limit. The current top-level agent
-remains allocated during input. No TEST process is started for PRD.
+comes first; it does not extend the overall limit. `agent none` avoids holding
+an executor at future input. Pipeline Test post runs on its Linux executor
+before any environment deployment.
 
 ### Deployment contract and configuration
 
 ```text
 Checkout -> Build -> Test -> Package (one JAR + SHA-256) -> Security Scan
-  TEST -> Deploy (temporary) -> Smoke Test (owned process) -> cleanup
-  SIT  -> Deploy (currently blocked) -> Smoke Test (real SIT endpoint)
-  PRD  -> Approval -> Deploy (currently blocked) -> Smoke Test (real PRD endpoint)
+  -> Deploy to Test -> Smoke Test -> Prepare SIT Artifact -> archive/TEST cleanup
+  TEST -> done
+  SIT  -> Windows Deploy to SIT -> SIT Smoke Test -> leave SIT running
+  PRD  -> Production Configuration failure (no target)
 ```
 
 `scripts/deploy-test.sh` delegates to the existing temporary deployment.
-`scripts/deploy-sit.sh` and `scripts/deploy-prd.sh` are explicit, nonzero-exit
-placeholders, not remote implementations. Setting a URL or approving PRD does
-not enable them. `scripts/smoke-test.sh` dispatches TEST to the original
-process-aware smoke check and remote environments to `SmokeCheck.java`.
-Remote checks require a non-loopback HTTPS endpoint, no embedded credentials,
+SIT uses `scripts/sit-service.ps1` on Windows, not the Linux shell scripts.
+The shell SIT deploy/smoke branches explicitly reject execution and point to
+that Windows route. `scripts/deploy-prd.sh` remains a failure placeholder.
+TEST smoke remains process-aware. The unused remote PRD helper requires a
+non-loopback HTTPS endpoint, no embedded credentials,
 query or fragment, a trusted TLS certificate, HTTP 200 and the existing
 `"status":"UP"` response contract. HTTP redirects are not followed. An unreachable
 endpoint or wrong response eventually exits nonzero. An authenticated health
@@ -254,11 +272,11 @@ hostname actually refers to the intended environment.
 | --- | --- | --- |
 | `TARGET_ENV` | Choice parameter | Exactly `TEST`, `SIT` or `PRD`; rejected otherwise before Build. |
 | `SIMULATE_TEST_FAILURE` | Existing parameter | Test-failure demonstration only, not approval. |
-| `TEST_PORT` | Existing parameter | Temporary agent-local port, default 18081; unused by SIT/PRD. |
+| `TEST_PORT` | Fixed Pipeline environment | 18081 for temporary Pipeline Test in every request. |
 | `ARTIFACT_PATH` | Fixed Jenkinsfile environment | `target/jenkins-java-maven-demo-1.0.0.jar`; shared by scanner/deploy scripts, not a build parameter. |
 | `BUILD_TAG` | Jenkins built-in | Identifies only this build's temporary TEST process. |
-| `SIT_HEALTH_URL` | Trusted SIT job/folder configuration | Actual reachable SIT HTTPS health URL; unset by default. |
-| `PRD_HEALTH_URL` | Trusted release job/folder configuration | Actual reachable PRD HTTPS health URL; unset by default. |
+| SIT health | Fixed in Windows script | http://127.0.0.1:18082/api/health from Windows SIT agent; internal container check on port 8080. |
+| `PRD_HEALTH_URL` | Future protected release configuration | Not supplied; current Pipeline does not invoke remote PRD smoke. |
 | Remote target / transport / destination | Not yet defined | Approved real server/platform and immutable artifact destination; never derived from user input. |
 | Application configuration | Target-managed config or Jenkins secret file | Separate environment settings/profile, service account, ports, TLS and secret injection; never baked into the JAR. |
 | Credential IDs | Trusted deployment code/config after review | Separate real TEST/SIT/PRD IDs of the appropriate type; none invented here. |
@@ -275,7 +293,7 @@ The local checksum protects accidental replacement, not a malicious editor of
 the Pipeline or checksum file. Remote delivery verification remains part of the
 future deploy implementation.
 
-Post cleanup calls the original cleanup script only if this run attempted the
+Pipeline Test group post calls the original cleanup only if this run attempted the
 temporary TEST deployment (including partial failure). It never stops a SIT/PRD
 application. Do not add a generic remote shutdown to post cleanup. Deployment
 or smoke failure must remain a failure; rollback must not hide that failure.
@@ -316,7 +334,7 @@ or smoke failure must remain a failure; rollback must not hide that failure.
 | Environment | Current need | Configuration when real infrastructure exists |
 | --- | --- | --- |
 | TEST | None: loopback deployment uses no login or secret. | If remote deployment is added, create a TEST-only service identity and TEST-only credential. Never reuse SIT/PRD credentials. |
-| SIT | Not configured; deployment fails explicitly. | Create a separate SIT service identity/credential scoped to the protected SIT job/folder and real target. |
+| SIT | Local Docker named-pipe access under the dedicated Windows agent OS account; no deployment secret currently needed. | Protect the node/account; scope future registry/integration credentials to SIT only. |
 | PRD | Not configured; approval cannot enable deployment. | Create a least-privilege PRD service identity/credential in the restricted release folder/job, unavailable to TEST/SIT or untrusted SCM jobs. |
 | SCM | Optional credential for private checkout, managed by the job. | Read-only repository access; not a deployment identity. |
 
@@ -339,6 +357,10 @@ host keys; never bypass host-key checking. Clean up temporary secret files and
 review deploy/application logs before retaining them.
 
 ### Acceptance tests for the approval controls
+
+Use the current acceptance checklist in [ENVIRONMENTS.md](ENVIRONMENTS.md).
+The numbered cases below are historical for the earlier scaffold: its blocked
+SIT and PRD input-before-configuration expectations no longer apply.
 
 Run on an isolated authorized Jenkins job, not against live production:
 
@@ -405,7 +427,7 @@ No root installation, Docker socket or Jenkins scanner plugin is needed.
 Tools and databases persist under `$HOME/.cache/healthylife-trivy`. On the
 inspected `jenkins-backup` agent, HOME is `/var/jenkins_home`, already backed by
 the existing volume. Other agents need their own persistent writable HOME/cache;
-`agent any` does not guarantee one agent. Do not concurrently write the shared
+the Linux node label can match multiple agents. Do not concurrently write the shared
 cache from other jobs. Never delete caches or locks while a scanner is running.
 Trivy downloads a prebuilt vulnerability DB and a separate Java identification
 DB, rather than paging through the NVD API. The first download can still be large
@@ -454,7 +476,8 @@ sh scripts/security-scan.sh
 The working alternative for the inspected agent is a dedicated Java process
 **inside the Jenkins agent/container**, not production and not a separate
 Smoke Test instance. It binds to `http://127.0.0.1:18081` **inside that agent**.
-Change `TEST_PORT` to another free port between 1024 and 65535 if necessary.
+The Pipeline fixes TEST_PORT=18081. Standalone script callers may select another
+free port between 1024 and 65535 if needed.
 8080 and 50000 are rejected to protect Jenkins service ports. Host port 8081
 was occupied during inspection, so the default is 18081. Different jobs must
 choose different free ports.
@@ -481,10 +504,10 @@ Smoke Test output after completion rather than expecting a persistent website.
 The health check retries for up to 40 seconds and fails on HTTP errors or wrong
 status. The owned process is checked before and after the health request.
 
-For future Docker deployment, provision a **dedicated Docker-capable Linux
-Jenkins agent** with Docker CLI, approved daemon access, a Java 21 application
-image/build recipe, and networking allowing the agent to reach the published
-test port. Host sockets are not automatically available inside Jenkins.
+Persistent SIT uses a dedicated **Windows** agent on the confirmed Docker
+Desktop host; see ENVIRONMENTS.md. Do not mount Docker sockets into the
+controller or replace temporary TEST with the persistent service. Host sockets
+are not automatically available inside Jenkins.
 Docker socket access is effectively host-root authority and needs approval;
 a remote daemon also requires an explicit reachable host address, not assumed
 `localhost`. Then replace the deployment/cleanup script with container lifecycle
@@ -496,7 +519,7 @@ prune as part of this demo.
 ### Demonstrate a successful and failing build
 
 1. Configure Trivy download/network prerequisites. Run **Build with
-   Parameters**, `SIMULATE_TEST_FAILURE=false`, `TEST_PORT=18081`.
+   Parameters**, `TARGET_ENV=TEST`, `SIMULATE_TEST_FAILURE=false` (fixed port 18081).
    Success requires tests **and a real
    security scan** to pass. If findings block the build, review the HTML report
    and remediate them first; do not bypass the gate.
@@ -510,6 +533,10 @@ prune as part of this demo.
 4. Uncheck the parameter for subsequent normal runs.
 
 ### Validation and current limits
+
+For current Pipeline Test / persistent SIT / blocked Production verification,
+see [ENVIRONMENTS.md](ENVIRONMENTS.md). Results below are historical, not claims
+that the new SIT service has been deployed or verified live.
 
 Multi-environment change validation on 2026-10-29:
 

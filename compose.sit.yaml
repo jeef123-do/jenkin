@@ -1,0 +1,17 @@
+name: healthylife-sit
+services:
+  sit-app:
+    image: ${HEALTHYLIFE_SIT_IMAGE:?Set by scripts/sit-service.ps1}
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: sit
+    ports:
+      - "127.0.0.1:18082:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
