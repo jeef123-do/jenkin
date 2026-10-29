@@ -19,7 +19,6 @@
 
   <properties>
     <java.version>21</java.version>
-    <dependency-check.dataDirectory>${settings.localRepository}/org/owasp/dependency-check-data/13.0</dependency-check.dataDirectory>
   </properties>
 
   <dependencies>
@@ -47,35 +46,4 @@
     </plugins>
   </build>
 
-  <profiles>
-    <profile>
-      <id>security</id>
-      <build>
-        <plugins>
-          <plugin>
-            <groupId>org.owasp</groupId>
-            <artifactId>dependency-check-maven</artifactId>
-            <version>13.0.0</version>
-            <configuration>
-              <dataDirectory>${dependency-check.dataDirectory}</dataDirectory>
-              <nvdValidForHours>4</nvdValidForHours>
-              <nvdApiDelay>3500</nvdApiDelay>
-              <nvdMaxRetryCount>10</nvdMaxRetryCount>
-              <connectionTimeout>30000</connectionTimeout>
-              <readTimeout>120000</readTimeout>
-              <failBuildOnCVSS>7.0</failBuildOnCVSS>
-              <failOnError>true</failOnError>
-              <nvdApiKeyEnvironmentVariable>NVD_API_KEY</nvdApiKeyEnvironmentVariable>
-              <skipTestScope>false</skipTestScope>
-              <ossIndexAnalyzerEnabled>false</ossIndexAnalyzerEnabled>
-              <formats>
-                <format>HTML</format>
-                <format>JSON</format>
-              </formats>
-            </configuration>
-          </plugin>
-        </plugins>
-      </build>
-    </profile>
-  </profiles>
 </project>

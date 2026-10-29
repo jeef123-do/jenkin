@@ -30,6 +30,7 @@ HealthyLife is a friendly, responsive wellness dashboard with a BMI calculator a
 ├── pom.xml
 ├── scripts/
 │   ├── SmokeCheck.java
+│   ├── security-scan.sh
 │   └── test-environment.sh
 └── src/
     ├── main/
@@ -158,7 +159,7 @@ The optional Male/Female selection is saved in `localStorage` and is not sent to
 
 1. Push the updated project to GitHub with `pom.xml` and `Jenkinsfile` at its root.
 2. Ensure the agent meets the Linux prerequisites above. The inspected `jenkins` container has Java 21, Maven 3.9.9 and GNU `timeout`, but **neither Docker CLI nor a Docker socket**. Host Docker access does not imply Jenkins Docker access. No Docker Pipeline plugin or `agent { docker { ... } }` syntax is used.
-3. Configure the NVD credential described below. Jenkins needs Declarative Pipeline, Git, Credentials Binding, JUnit and Timestamper plugins. No OWASP Jenkins plugin is needed: Maven downloads the pinned scanner.
+3. Allow the Trivy release/database downloads described below. Jenkins needs Declarative Pipeline, Git, JUnit and Timestamper plugins. No scanner Jenkins plugin, Docker daemon or NVD credential is required.
 4. Create a **Pipeline** job or edit the existing one. Choose **Pipeline script from SCM**, select **Git**, and use `https://github.com/jeef123-do/jenkin.git` with repository credentials if needed.
 5. Set **Branch Specifier** to `*/main` and **Script Path** to `Jenkinsfile`, then save.
 6. Select **Build Now** once to load updated parameter definitions, then use **Build with Parameters**.
@@ -170,135 +171,74 @@ The optional Male/Female selection is saved in `localStorage` and is not sent to
 | Checkout | Explicit `checkout scm`, with automatic checkout disabled. |
 | Build | Require Java 21, then Maven Wrapper `clean compile`. |
 | Test | Run the suite, preserving `SIMULATE_TEST_FAILURE`. |
-| Security Scan | Run OWASP Dependency-Check **13.0.0** via the `security` Maven profile. Fail on scanner errors or vulnerabilities with **CVSS >= 7.0**. |
 | Package | Package the already-tested application as an executable JAR. |
+| Security Scan | Run pinned Trivy **0.76.1** against the packaged JAR, including nested dependencies. Fail on HIGH/CRITICAL findings or scanner errors before deployment. |
 | Deploy to Test | Start that JAR on the agent's loopback interface and `TEST_PORT`; wait up to 60 seconds for successful Spring startup. |
 | Smoke Test | Check that existing deployment's `/api/health`, requiring HTTP 200 and `"status":"UP"`; never start another instance. |
 
 Post actions retain JUnit results and archive `target/*.jar`, available
-`target/dependency-check-report.html` / `.json`, and `target/deployment/*.log`,
+`target/security/*` (HTML, JSON, text and package inventory), and `target/deployment/*.log`,
 including reports produced before a failed security gate. An unavailable
 database/service may prevent report generation; no report does **not** mean a
 successful scan. Retention is 10 builds with artifacts for the latest 5. Builds
-of the same job cannot overlap. Normal CI/CD has a 60-minute overall timeout
-and a 45-minute scan timeout. Database-preparation mode has a 9-hour overall
-timeout and an 8-hour preparation timeout. Standard Declarative behavior skips
+of the same job cannot overlap. CI/CD has a 60-minute overall timeout
+and a 30-minute scan-stage timeout (the Trivy scan itself allows 20 minutes).
+Standard Declarative behavior skips
 dependent stages after a failure.
 
 ### Security scanner setup and policy
 
-1. Request/activate an [NVD API key](https://nvd.nist.gov/developers/request-an-api-key).
-2. In **Manage Jenkins → Credentials → appropriate domain → Add Credentials**,
-   select **Secret text**, paste the key into **Secret**, and set **ID** to
-   `nvd-api-key`. Alternatively, set `NVD_API_KEY_CREDENTIAL_ID` to your credential
-   ID. This parameter is the **ID, never the key**.
-3. Allow outbound HTTPS to Maven Central, `services.nvd.nist.gov`, and supporting
-   Dependency-Check feeds, including CISA KEV and hosted suppressions. Configure
-   the agent proxy/trust store if required.
-4. Run the Pipeline. `withCredentials` provides a masked `NVD_API_KEY` environment
-   variable only during the scan; Maven reads it through
-   `nvdApiKeyEnvironmentVariable`. Never echo it, enable Maven debug logging,
-   pass it on the command line, or commit it.
+The Pipeline now uses **Trivy 0.76.1**, replacing Dependency-Check. The Maven
+`security` profile, NVD credentials binding and `INITIALIZE_NVD_DATABASE` mode
+are removed. Old parameters disappear after Jenkins loads the new Jenkinsfile.
+An already-running NVD build is not changed or stopped; its database and Jenkins
+credentials are left untouched. No API key is required for the new scanner.
 
-At the initial inspection there was no Dependency-Check installation/cache in
-the Jenkins agent; subsequent runs have created a persistent database.
-The profile pins the scanner and Maven must successfully resolve it. Missing or
-empty credentials, download/feed errors, rate limits, invalid keys, missing data,
-and timeouts fail the stage rather than producing a green build. The initial NVD
-download can take many minutes; retain the agent's Maven/Dependency-Check cache.
-Serialize scans sharing a writable database across jobs, or give each agent its
-own cache to avoid database locking.
+The Linux agent needs `curl`, `sha256sum`, `tar`, `awk`, `grep`, `mktemp`, `wc`
+and standard POSIX utilities, plus outbound HTTPS to GitHub release assets and
+Trivy OCI database registries (defaults include `mirror.gcr.io` and `ghcr.io`).
+The script downloads the pinned Linux x86_64/ARM64 release and validates its
+SHA-256 against the versioned official release checksum list before extraction.
+The checksum list is fetched over HTTPS from the same release; this protects
+against corrupt downloads, not compromise of the upstream release itself.
+No root installation, Docker socket or Jenkins scanner plugin is needed.
 
-#### First download exceeds the normal scan timeout
+Tools and databases persist under `$HOME/.cache/healthylife-trivy`. On the
+inspected `jenkins-backup` agent, HOME is `/var/jenkins_home`, already backed by
+the existing volume. Other agents need their own persistent writable HOME/cache;
+`agent any` does not guarantee one agent. Do not concurrently write the shared
+cache from other jobs. Never delete caches or locks while a scanner is running.
+Trivy downloads a prebuilt vulnerability DB and a separate Java identification
+DB, rather than paging through the NVD API. The first download can still be large
+or fail due to registry/network limits; faster startup is not guaranteed.
 
-Use the separate database-preparation mode when the initial NVD download cannot
-finish within 45 minutes:
+**Package now precedes Security Scan** intentionally: Trivy scans the exact
+Spring Boot executable JAR, including nested runtime dependencies, before Deploy.
+The script copies only that JAR into a staging directory and uses `trivy rootfs`
+to enable binary/JAR analysis (filesystem source scanning does not enable the
+same analyzers). No container image or actual operating-system root is scanned.
+Test-only dependencies absent from that JAR are no longer covered, unlike the
+previous Dependency-Check configuration. JUnit tests still run normally.
+This is a runtime dependency scan, not source-code, secrets, container-image or
+penetration testing. Identification/database coverage can have false positives
+or negatives; the script refuses a scan that does not identify expected Spring
+Boot packages, but this is not proof every dependency was recognized.
 
-1. Commit/push the updated Jenkinsfile and let the job load its new parameter
-   definitions. Changes do not modify an already-running build.
-2. Wait for the current scanner to finish/stop before starting preparation.
-   Never delete the database, its lock, or cache while a scanner is running.
-3. Choose **Build with Parameters**, check `INITIALIZE_NVD_DATABASE`, leave
-   `SIMULATE_TEST_FAILURE` unchecked, and set
-   `NVD_API_KEY_CREDENTIAL_ID=nvd-api-key`.
-4. The job runs **Checkout → Prepare NVD Database** with
-   `sh mvnw -B -Psecurity dependency-check:update-only`. It has up to 8 hours
-   for the initial download. Build/Test/Security Scan/Package/Deploy/Smoke Test
-   are deliberately skipped. This mode publishes neither old test results nor
-   old workspace artifacts and never claims the dependency scan passed.
-5. Only after preparation succeeds, run again with
-   **`INITIALIZE_NVD_DATABASE=false`** to execute normal CI/CD with the real
-   vulnerability gate.
+The gate uses Trivy's **HIGH/CRITICAL severity classifications**, not a direct
+numeric CVSS 7.0 comparison: vendors/data sources may classify differently.
+LOW/MEDIUM/UNKNOWN remain in the full reports; UNKNOWN findings require manual
+review and do not block by this policy. Unfixed HIGH/CRITICAL findings also block.
+No ignore file is used. Download/scan/report errors fail, and reports are
+generated before the severity gate so a blocked build retains the findings.
+The JSON-producing scan uses exit code 0 for findings only; the final
+`trivy convert --severity HIGH,CRITICAL --exit-code 1` is the mandatory gate.
+The scanner binary is pinned; vulnerability data changes over time. Existing
+Spring Boot 3.4.5 dependencies may legitimately block deployment.
 
-The inspected active container is now `jenkins-backup`, mounting the existing
-`jenkins_home` volume. Its Maven scanner cache is under
-`/var/jenkins_home/.m2/repository/org/owasp/dependency-check-data/`.
-The `11.0` subdirectory is the scanner's data-schema version, not the pinned
-plugin version (13.0.0). Both update-only and normal scan use the same Maven
-profile/cache; `mvn clean` removes `target`, not this cache.
-The database was approximately 290 MB during inspection, but file existence
-does not prove a complete usable update. An interrupted initial update can
-require downloading records again; it is not guaranteed to resume at the last
-console counter.
+To run on a compatible Linux agent after packaging:
 
-At the reported rate of roughly 10,000 records in nine minutes, 416,000 records
-could require several hours; this is only an estimate. Eight hours is a bounded
-first-download allowance, not a speed fix or guarantee. Feed errors/timeouts
-still fail preparation. If progress stalls or HTTP 403/429/retry warnings appear,
-investigate the key, shared API usage, proxy and NVD availability instead of
-repeatedly restarting or reducing the API delay. Serialize other jobs that share
-this database or key. Subsequent builds need the same persistent cache/agent;
-`agent any` does not ensure this in a multi-agent Jenkins installation.
-
-#### Explicit persistent cache configuration
-
-The security profile explicitly sets `dataDirectory` through the Maven property
-`dependency-check.dataDirectory`. Its default is
-`${settings.localRepository}/org/owasp/dependency-check-data/11.0`, matching the
-existing Dependency-Check 13.0.0 cache so no database migration or fresh download
-is introduced by this change. On the inspected Jenkins agent this is already
-inside the persistent `jenkins_home` volume; no new Docker bind mount is needed.
-The schema suffix must be reviewed when upgrading the scanner.
-
-`nvdValidForHours` is explicitly **4**, preserving the scanner's normal NVD
-freshness window. A successful recent update can be reused instead of querying
-NVD on every run; older data triggers an update. This is not offline mode,
-does not disable update errors, and does not make an incomplete initial download
-complete. Preparation and normal scans use the same settings. Other supporting
-feeds may still make network requests within the NVD freshness window.
-
-For another approved persistent location, pass the same property to both
-`dependency-check:update-only` and `dependency-check:check`, for example
-`"-Ddependency-check.dataDirectory=/approved/persistent/owasp"`. Changing this
-path to an empty directory requires initialization again. Do not copy/move live
-database files; wait until all scanner processes using them have stopped.
-The directory must be writable by the agent and scans sharing it must be
-serialized across jobs.
-
-Unlike the GitLab example, this Jenkins setup does not hardcode a key, pass it
-through `-DnvdApiKey=...`, use `/tmp` as an unmounted cache, or allow scan failure.
-HTML/JSON reports and environment-variable credential binding already exist.
-SonarQube integration is not needed to retain Jenkins security reports and is not
-added. Persistent caching helps subsequent updates, not the throughput of the
-first full NVD download.
-
-The explicit **7.0** threshold blocks High/Critical findings; Low/Medium findings
-remain visible in reports. Test dependencies are included. No skip flag,
-suppression file or error-ignoring fallback is configured. OSS Index is
-explicitly disabled because it is an additional authenticated service: this demo
-uses NVD-based dependency matching without requiring Sonatype credentials, with
-less coverage than combining both sources. This is not a source-code, secrets,
-container-image or runtime penetration scan. CPE matching can produce false
-positives/negatives; review findings and remediate dependencies instead of
-weakening the gate. The tool is pinned but vulnerability data changes over time.
-The existing Spring Boot 3.4.5 dependency set may legitimately fail this gate;
-no dependency upgrades or claims of a clean scan are implied by this change.
-
-For a local scan, securely populate `NVD_API_KEY` in your session (do not put its
-value in shell history), then run:
-
-```powershell
-.\mvnw.cmd -B -Psecurity dependency-check:check
+```sh
+sh scripts/security-scan.sh
 ```
 
 ### Temporary test environment and Docker prerequisites
@@ -325,7 +265,7 @@ The port is **not published on the Windows host**. During a live build, inspect
 it from the host with:
 
 ```powershell
-docker exec jenkins curl --fail http://127.0.0.1:18081/api/health
+docker exec jenkins-backup curl --fail http://127.0.0.1:18081/api/health
 ```
 
 The application stops responding after post cleanup. Review archived logs and
@@ -347,10 +287,9 @@ prune as part of this demo.
 
 ### Demonstrate a successful and failing build
 
-1. Configure the NVD credential and network prerequisites. Run **Build with
-   Parameters**, `INITIALIZE_NVD_DATABASE=false`,
-   `SIMULATE_TEST_FAILURE=false`, `TEST_PORT=18081`,
-   `NVD_API_KEY_CREDENTIAL_ID=nvd-api-key`. Success requires tests **and a real
+1. Configure Trivy download/network prerequisites. Run **Build with
+   Parameters**, `SIMULATE_TEST_FAILURE=false`, `TEST_PORT=18081`.
+   Success requires tests **and a real
    security scan** to pass. If findings block the build, review the HTML report
    and remediate them first; do not bypass the gate.
 2. Check all seven stages, JUnit results, archived JAR, HTML/JSON security reports,
@@ -370,11 +309,17 @@ prune as part of this demo.
   rejection without killing the existing app, failing HTTP 404 health check,
   idempotent cleanup, interrupted-startup cleanup with a failing exit status,
   and a closed port after cleanup also verified.
-- Dependency-Check 13.0.0 resolution/configuration verified. An invocation against
-  an intentionally empty offline database failed with `NoDataException` and
-  nonzero exit, proving missing-data fail-closed behavior. **No completed
-  vulnerability scan or passing security gate has been verified**; an NVD key
-  and live feed access are prerequisites.
+- Trivy 0.76.1 release installation/checksum, vulnerability DB and Java DB
+  downloads, and a real packaged-JAR scan were verified on `jenkins-backup`.
+  Initial database downloads completed in approximately three minutes on that
+  run (not a guarantee). The scanner identified 35 packages and reported 8
+  CRITICAL, 25 HIGH, 28 MEDIUM and 12 LOW findings; these are report entries,
+  not necessarily unique CVEs. The final gate correctly returned exit 1.
+  HTML/JSON/text/inventory reports were generated. No deployment was attempted
+  as part of this scanner validation and no passing security gate is claimed.
+  A filtered nonblocking report fixture returned success; the real report and
+  a missing report returned failure. Fix dependencies before demonstrating
+  successful CI/CD; do not lower severity or ignore findings just to get green.
 - Jenkinsfile Groovy syntax parsed successfully with the installed Jenkins
   Groovy version. The authenticated Declarative validator returned HTTP 403
   without credentials; **a full Jenkins Pipeline run has not been verified**.
@@ -396,9 +341,9 @@ From this existing repository, review only intended changes, commit and push:
 ```powershell
 git status --short
 git diff --check
-git diff -- Jenkinsfile pom.xml scripts/test-environment.sh README.md
-git add .gitattributes Jenkinsfile pom.xml scripts/test-environment.sh README.md
-git commit -m "Add security scanning and temporary test deployment" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+git diff -- Jenkinsfile pom.xml scripts/security-scan.sh README.md
+git add Jenkinsfile pom.xml scripts/security-scan.sh README.md
+git commit -m "Replace NVD dependency scan with pinned Trivy" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 git push -u origin main
 ```
 
@@ -417,6 +362,6 @@ owner; never commit credentials or generated reports.
 - **Port 8080 is already in use:** stop the other process or run the app with `.\mvnw.cmd -B spring-boot:run '-Dspring-boot.run.arguments=--server.port=8081'`, then open `http://localhost:8081/`.
 - **The browser reports a connection error:** make sure the application is running and reload the page at `http://localhost:8080/`.
 - **Local settings cannot be saved:** allow site storage in the browser; the app will show a message and continue to use entered values for the open page.
-- **Security Scan fails:** inspect the stage log and available reports. Check the Secret text credential, network/proxy and feed access; remediate blocking CVSS findings instead of disabling failure handling.
+- **Security Scan fails:** inspect the stage log and available Trivy reports. Check release/OCI registry network access and persistent cache permissions; remediate HIGH/CRITICAL findings rather than disabling the gate. NVD credentials are no longer used.
 - **Test deployment fails:** inspect `target/deployment/app.log`, choose a free `TEST_PORT`, verify Linux/GNU `timeout`/Java 21 prerequisites, and leave unrelated processes alone.
 - **Smoke test fails in Jenkins:** inspect the deployment log and health-check URL. Cleanup targets only the current build's deployment; an agent-local port is not a Windows-host URL.
