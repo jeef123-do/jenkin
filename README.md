@@ -159,7 +159,7 @@ The optional Male/Female selection is saved in `localStorage` and is not sent to
 
 1. Push the updated project to GitHub with `pom.xml` and `Jenkinsfile` at its root.
 2. Ensure the agent meets the Linux prerequisites above. The inspected `jenkins` container has Java 21, Maven 3.9.9 and GNU `timeout`, but **neither Docker CLI nor a Docker socket**. Host Docker access does not imply Jenkins Docker access. No Docker Pipeline plugin or `agent { docker { ... } }` syntax is used.
-3. Allow the Trivy release/database downloads described below. Jenkins needs Declarative Pipeline, Git, JUnit and Timestamper plugins. No scanner Jenkins plugin, Docker daemon or NVD credential is required.
+3. Allow the Trivy release/database downloads described below. Jenkins needs Declarative Pipeline, Pipeline: Input Step, Git, JUnit and Timestamper plugins. Future credential-backed deployments also need Credentials and Credentials Binding. No scanner Jenkins plugin, Docker daemon or NVD credential is required.
 4. Create a **Pipeline** job or edit the existing one. Choose **Pipeline script from SCM**, select **Git**, and use `https://github.com/jeef123-do/jenkin.git` with repository credentials if needed.
 5. Set **Branch Specifier** to `*/main` and **Script Path** to `Jenkinsfile`, then save.
 6. Select **Build Now** once to load updated parameter definitions, then use **Build with Parameters**.
@@ -175,6 +175,9 @@ The optional Male/Female selection is saved in `localStorage` and is not sent to
 | Security Scan | Run pinned Trivy **0.76.1** against the packaged JAR, including nested dependencies. Fail on HIGH/CRITICAL findings or scanner errors before deployment. |
 | Deploy to Test | Start that JAR on the agent's loopback interface and `TEST_PORT`; wait up to 60 seconds for successful Spring startup. |
 | Smoke Test | Check that existing deployment's `/api/health`, requiring HTTP 200 and `"status":"UP"`; never start another instance. |
+| Deploy to SIT | Only for a SIT request, after the existing TEST deployment and smoke check. Fail explicitly until real SIT infrastructure is configured; no approval. |
+| Production Approval | Only for a PRD request, after all preceding gates succeed. `input` restricts approval to `release-manager`, with a 15-minute timeout within the existing 60-minute overall timeout. |
+| Deploy to PRD | Only after PRD approval. Fail explicitly until real PRD infrastructure, credentials and authorization are configured. No PRD deployment command exists yet. |
 
 Post actions retain JUnit results and archive `target/*.jar`, available
 `target/security/*` (HTML, JSON, text and package inventory), and `target/deployment/*.log`,
@@ -185,6 +188,140 @@ of the same job cannot overlap. CI/CD has a 60-minute overall timeout
 and a 30-minute scan-stage timeout (the Trivy scan itself allows 20 minutes).
 Standard Declarative behavior skips
 dependent stages after a failure.
+
+### Environment requests and production approval
+
+`DEPLOY_ENV` defaults to `TEST`. It is only a deployment request, never evidence
+of authorization. The pre-existing `SIMULATE_TEST_FAILURE` checkbox only makes
+the Test stage fail; the original pipeline had no PRD switch, production
+deployment, deploy credentials or SIT implementation. Jenkins job ACLs,
+credential stores and infrastructure permissions are not defined in this
+repository and cannot be verified from this file.
+
+All requests still run the original temporary TEST deployment and Smoke Test.
+There is no approval for TEST or SIT. SIT requests then fail explicitly because
+no SIT target exists. PRD requests reach `input` only after successful Build,
+Test, Package, Security Scan and TEST smoke check. Approval is limited to the
+exact Jenkins user/group `release-manager`. Jenkins administrators can still
+approve despite `submitter`; users with Job/Cancel can abort a pending input.
+An abort or timeout propagates normally, skips Deploy to PRD and still runs post
+actions/cleanup. It is not caught or converted into approval.
+
+The internal Groovy approval flag is set only after `input` returns successfully,
+not from a parameter. Deploy to PRD also checks that flag and a successful build
+result. `disableRestartFromStage()` prevents restarting at Approval or Deploy
+to bypass earlier gates; a fresh run also starts with a false approval flag.
+This is defense in depth, not protection against someone who can edit/replay
+the Pipeline or control Jenkins. Do not use stage restart to skip required
+gates: restrict restart/replay permissions and use fresh full PRD builds only.
+Do not rebuild or replace the scanned artifact after approval.
+
+**Even approved PRD requests currently fail deliberately without deploying.**
+Provide and review the real SIT/PRD endpoints, transport, artifact destination,
+deployment and health/rollback scripts, environment-specific credential IDs,
+agent isolation and authorization before replacing the explicit errors.
+No server, URL or credential ID is invented here. Approval expires after 15
+minutes or when the existing overall 60-minute timeout is reached, whichever
+comes first; it does not extend the overall limit. The current top-level agent
+remains allocated during input. The TEST process may expire during the wait
+and is never a persistent release environment.
+
+### Required Jenkins authorization and credentials (outside Jenkinsfile)
+
+- Configure a real security realm (Jenkins accounts, LDAP/AD or SSO) with a
+  unique `release-manager` user or group, trusted group membership and tested
+  exact-name resolution. Avoid a user/group name collision. `submitter` alone
+  is not an authorization strategy; enable Matrix Authorization or an
+  appropriately scoped Role-based Authorization strategy. Remove anonymous
+  build/configuration access.
+- Give builders Overall/Read, Job/Read and Job/Build only on the intended job.
+  Give release managers sufficient Overall/Read and Job/Read access to inspect
+  the build and approve via `input`. The input allowlist controls approval;
+  granting Job/Build does not grant approval. Keep Job/Cancel limited to
+  operators who may abort a release. Treat Overall/Administer as privileged
+  break-glass access and audit its approval bypass.
+- Limit Job/Configure, Job/Create, Job/Move, Job/Delete, Run/Replay,
+  Run/Update/restart capabilities and credential create/update/view/use
+  permissions to trusted administrators as appropriate for installed plugins.
+  Protect the SCM branch, Jenkinsfile, Maven Wrapper and deploy/scan scripts
+  with required review; prevent untrusted PRs/branches from running with PRD
+  credentials. A configurable job or replayable Pipeline can remove this gate.
+- Store future PRD secrets in a separately authorized release folder/job with
+  PRD-only trusted agents and network/service-account access. Do not put PRD
+  secrets at global scope reachable by untrusted jobs. Credential domains and
+  distinct IDs alone are not an ACL; folder credentials are accessible to jobs
+  in that folder, and `withCredentials` only limits binding lifetime. If this
+  general CI job is editable by developers, use a protected release job rather
+  than exposing PRD credentials to it. Do not run secret-bearing steps beside
+  untrusted workloads under the same OS identity.
+- Review Job/Workspace, artifact/log read permissions and retention. Never
+  archive credential files, credential-bearing config or secret-bearing logs.
+  Audit approvals, configuration/SCM changes and credential use in Jenkins and
+  the target system. Enforce least privilege at the target infrastructure too.
+
+| Environment | Current need | Configuration when real infrastructure exists |
+| --- | --- | --- |
+| TEST | None: loopback deployment uses no login or secret. | If remote deployment is added, create a TEST-only service identity and TEST-only credential. Never reuse SIT/PRD credentials. |
+| SIT | Not configured; deployment fails explicitly. | Create a separate SIT service identity/credential scoped to the protected SIT job/folder and real target. |
+| PRD | Not configured; approval cannot enable deployment. | Create a least-privilege PRD service identity/credential in the restricted release folder/job, unavailable to TEST/SIT or untrusted SCM jobs. |
+| SCM | Optional credential for private checkout, managed by the job. | Read-only repository access; not a deployment identity. |
+
+Select binding by the actual deployment transport: `sshUserPrivateKey` for
+**SSH Username with private key** (`keyFileVariable` and, if needed,
+`usernameVariable`/`passphraseVariable`), `usernamePassword` for a service login,
+`string` for **Secret text** tokens, or `file` for **Secret file** configuration.
+Use `withCredentials` only inside the relevant deploy stage, for the shortest
+possible block, after PRD approval and the internal guard. Supply the actual
+admin-configured ID in trusted configuration, not a user-controlled build
+parameter. There is intentionally no unused/dummy binding in this Jenkinsfile.
+
+Use single-quoted Groovy shell scripts so the shell, not Groovy interpolation,
+expands bound environment variables; start secret-bearing shell blocks with
+`set +x`. Never echo secrets, dump the environment, enable verbose HTTP/SSH
+tracing, or put secrets in command-line arguments. Masking is best effort, not
+access control. Use stdin or protected temporary files outside archived/browsable
+workspace paths as supported by the real client. For SSH, provision verified
+host keys; never bypass host-key checking. Clean up temporary secret files and
+review deploy/application logs before retaining them.
+
+### Acceptance tests for the approval controls
+
+Run on an isolated authorized Jenkins job, not against live production:
+
+1. Validate with the authenticated Declarative validator below, then run a
+   complete SCM build. A Groovy parse or a mocked test is not a substitute for
+   Jenkins Declarative validation, installed plugin checks or a real ACL test.
+2. With `DEPLOY_ENV=TEST` and `SIMULATE_TEST_FAILURE=false`, require all original
+   stages to pass without input. Check JUnit, archived JAR/scan/logs and cleanup.
+   The SIT/PRD stages must be skipped.
+3. With `DEPLOY_ENV=SIT`, require the same TEST checks, no input, and an explicit
+   not-configured failure in Deploy to SIT. This does **not** prove a SIT
+   deployment works: none exists yet. After real SIT wiring, verify its actual
+   health check, identity and isolation without adding an approval.
+4. Request PRD as a normal builder: after all gates pass, leave input pending
+   and confirm Deploy to PRD has not started. Attempt approval via both UI and
+   the input HTTP API with an unauthorized non-admin account; neither may
+   advance the run. Selecting PRD or starting a build must not change this.
+5. Approve using a verified release-manager account. Only then may Deploy to
+   PRD start; it must currently fail as not configured with no network deploy
+   or PRD credential binding. After real wiring, verify the approved artifact
+   fingerprint, audit record, target identity and target health.
+6. Abort input and let it time out in separate runs. Require an aborted run,
+   skipped PRD deploy and preserved post/cleanup, with no credential use.
+7. Set `SIMULATE_TEST_FAILURE=true` with PRD requested. Test must fail before
+   approval. In reviewed throwaway test branches, separately induce a Build
+   failure, Security Scan nonzero exit (scanner error and HIGH/CRITICAL finding),
+   and an unstable test result. None may approve/deploy; never disable the real
+   security gate to obtain a production approval.
+8. Confirm Restart from Stage is unavailable, including for Approval and Deploy
+   to PRD. In an isolated mocked restart, missing same-run approval must fail.
+   Confirm ordinary users cannot configure/replay or otherwise skip gates.
+   Confirm unrelated jobs/branches cannot bind the eventual PRD
+   credentials or reach PRD. Do not print secret values to demonstrate access.
+9. Verify administrator bypass separately and audit it; do not claim that
+   `submitter` blocks Jenkins administrators. Send a second build while the
+   first waits: `disableConcurrentBuilds()` must queue it. Verify the unchanged
+   global/scan timeouts, JUnit/archive retention and TEST cleanup after aborts.
 
 ### Security scanner setup and policy
 
@@ -301,7 +438,7 @@ prune as part of this demo.
    Success requires tests **and a real
    security scan** to pass. If findings block the build, review the HTML report
    and remediate them first; do not bypass the gate.
-2. Check all seven stages, JUnit results, archived JAR, HTML/JSON security reports,
+2. Check all original stages, JUnit results, archived JAR, HTML/JSON security reports,
    deployment log, and health-check success URL.
 3. Run again with `SIMULATE_TEST_FAILURE=true`. **Test** intentionally fails,
    JUnit shows the assertion failure, and Security Scan, Package, Deploy to Test
@@ -310,6 +447,30 @@ prune as part of this demo.
 4. Uncheck the parameter for subsequent normal runs.
 
 ### Validation and current limits
+
+Approval-control change validation on 2026-10-29:
+
+- The updated Jenkinsfile parsed with the installed Groovy 2.4.21 library.
+  Fourteen isolated mocked control-flow cases passed: default TEST, blocked
+  SIT, approved-but-unconfigured PRD, abort, timeout, failures in Build/Test/
+  Package/Scan/TEST deployment/smoke, the existing simulated test failure,
+  unstable results and a direct-deploy restart simulation. These mocks do not
+  execute Jenkins CPS, Declarative directives, real input authorization or
+  credential ACLs.
+- Both unchanged shell scripts passed `sh -n`. The existing local packaged JAR
+  was exercised with the unchanged TEST script in an isolated temporary folder
+  on `jenkins-backup`, port 28187. Deployment, real health check and closed port
+  after cleanup passed on the second attempt. The first attempt reported
+  application exit before startup with an empty application log; cleanup ran.
+  The cause of that intermittent startup result is not confirmed or changed
+  by this approval-only patch.
+- The current Declarative validator attempt returned HTTP 403 without
+  authorization. Authenticated Declarative validation and the real approval/
+  permission acceptance tests above remain required. No full SCM-triggered
+  build, new Maven test run, new vulnerability scan, SIT or PRD deployment is
+  claimed for this change.
+
+Earlier application/scanner validation (not rerun by this approval-only change):
 
 - Maven Wrapper `clean package`: verified, **15 tests passed**.
 - `test -Ddemo.fail=true`: verified nonzero exit, **1 intentional failure**.
