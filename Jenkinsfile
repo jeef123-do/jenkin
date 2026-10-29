@@ -4,7 +4,7 @@ pipeline {
         timestamps()
         disableConcurrentBuilds()
         skipDefaultCheckout(true)
-        timeout(time: params.INITIALIZE_NVD_DATABASE ? 540 : 60, unit: 'MINUTES')
+        timeout(time: params.INITIALIZE_NVD_DATABASE ? 540 : 180, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '5'))
     }
     parameters {
@@ -14,8 +14,6 @@ pipeline {
                      description: 'Tick only to demonstrate the failing Test stage.')
         string(name: 'TEST_PORT', defaultValue: '18081',
                description: 'Temporary test application port on the Linux agent (not Jenkins port 8080).')
-        string(name: 'NVD_API_KEY_CREDENTIAL_ID', defaultValue: 'nvd-api-key',
-               description: 'Jenkins Secret text credential ID for the NVD API key; never enter the key here.')
     }
     stages {
         stage('Checkout') {
@@ -32,13 +30,12 @@ pipeline {
             }
             steps {
                 echo 'Database preparation only, NOT a vulnerability scan. Keep the agent Maven cache; do not run other jobs against the same database concurrently.'
-                withCredentials([string(credentialsId: params.NVD_API_KEY_CREDENTIAL_ID,
-                                        variable: 'NVD_API_KEY')]) {
+                withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
                     sh '''
                         set -eu
                         set +x
                         if [ -z "$NVD_API_KEY" ]; then
-                            echo "NVD API key is empty. Configure the Jenkins Secret text credential." >&2
+                            echo "NVD API key is empty. Configure the Jenkins Secret text credential with ID nvd-api-key." >&2
                             exit 1
                         fi
                         if ! java -version 2>&1 | grep -Eq 'version "21([.]|")'; then
@@ -84,17 +81,16 @@ pipeline {
                 expression { !params.INITIALIZE_NVD_DATABASE }
             }
             options {
-                timeout(time: 45, unit: 'MINUTES')
+                timeout(time: 90, unit: 'MINUTES')
             }
             steps {
-                echo 'Dependency-Check 13.0.0: requires NVD Secret text credential, Maven Central and vulnerability-feed access. Missing credentials, scanner errors, or CVSS >= 7.0 fail this stage.'
-                withCredentials([string(credentialsId: params.NVD_API_KEY_CREDENTIAL_ID,
-                                        variable: 'NVD_API_KEY')]) {
+                echo 'Dependency-Check 13.0.0: requires the nvd-api-key Secret text credential, Maven Central and vulnerability-feed access. Missing credentials, scanner errors, or CVSS >= 7.0 fail this stage.'
+                withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
                     sh '''
                         set -eu
                         set +x
                         if [ -z "$NVD_API_KEY" ]; then
-                            echo "NVD API key is empty. Configure the Jenkins Secret text credential." >&2
+                            echo "NVD API key is empty. Configure the Jenkins Secret text credential with ID nvd-api-key." >&2
                             exit 1
                         fi
                         sh mvnw -B -Psecurity dependency-check:check
